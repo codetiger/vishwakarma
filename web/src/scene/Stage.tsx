@@ -17,10 +17,9 @@ interface Props {
   onStats?: (tiles: number, voxels: number) => void;
 }
 
-// Owns the <Canvas>. The camera roams just above the terrain; the far plane
-// reaches past the LOD clipmap's outer radius so the distant coarse terrain is
-// visible, fading into the radial fog (curvature-based, in the shared curvature
-// shader — not linear scene fog).
+// Owns the <Canvas>. The camera roams just above the terrain; the far plane reaches
+// past the LOD clipmap's outer radius so the distant coarse terrain is visible,
+// curving down (round-world shader) to a clean silhouette against the starfield.
 export default function Stage({ voxelSize, focus, bounds, workers, inbox, onStats }: Props) {
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 760;
   const far = mapTheme.view.maxRadius + 60;
@@ -30,10 +29,9 @@ export default function Stage({ voxelSize, focus, bounds, workers, inbox, onStat
       camera={{ position: [0, 20, 0], fov: 55, near: 0.1, far }}
       gl={{ antialias: true, powerPreference: 'high-performance', toneMappingExposure: mapTheme.post.exposure }}
       onCreated={({ scene }) => {
-        // Clear to the fog/sky horizon colour (not the dark sky top) so the
-        // farthest fogged terrain blends into the backdrop with no seam even in
-        // the instant before the Skydome draws or at any uncovered edge.
-        scene.background = new THREE.Color(mapTheme.palette.skyHorizon);
+        // Clear to the dark space colour so any uncovered edge (or the instant before
+        // the starfield draws) reads as deep space, not a bright seam.
+        scene.background = new THREE.Color(mapTheme.palette.skyTop);
       }}
     >
       <Skydome />

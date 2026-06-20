@@ -2,7 +2,7 @@ import { useMemo, useRef } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
 import * as THREE from 'three';
 import { mapTheme } from '../mapTheme';
-import { applyWorldCurvature, curveUniforms } from './curvature';
+import { applyWorldCurvature } from './curvature';
 import { terrainHeight } from '../terrain';
 import type { FromWorker, ToWorker, TileResult } from '../voxelTypes';
 
@@ -33,13 +33,18 @@ const WORKER_DEPTH = 2; // outstanding tiles per pool worker (1 running + 1 queu
 //
 // LOD model (altitude-driven, Google-Earth style): the camera ALTITUDE picks a base
 // level L0 = the finest level shown anywhere; descend → L0 drops → the WHOLE visible
-// field sharpens uniformly. Around the look-at R we render just 3 levels in distance
-// bands — L0 (a fat near disk), L0+1, L0+2 — and cull beyond, letting the radial haze
-// dissolve the cut edge into the Skydome. The band radii scale with the cell size, so
-// the on-screen tile count stays ~constant at every altitude (the cells just get
-// physically finer as you descend). This sidesteps the ~55× vertical exaggeration
-// that makes a pure screen-space-error metric unable to ever reach the fine levels.
+// field sharpens uniformly. Around the look-at R a fat disk renders at L0, then the
+// field coarsens with distance up to the coarsest level, covering out to the round-
+// world horizon so the far terrain curves down to a clean silhouette against the
+// starfield (no fog). The disk radius scales with the cell size, so the near tile
+// count stays ~constant at every altitude — the cells just get physically finer as
+// you descend. This sidesteps the ~55× vertical exaggeration that makes a pure
+// screen-space-error metric unable to ever reach the fine levels.
 const BACK_MARGIN = 40; // world units behind the camera kept before culling
+// Cover terrain to ~this many round-world horizon distances. The horizon (where the
+// curvature bends terrain a camera-height below the eye) is ≈ sqrt(altY / curvature);
+// covering a bit past it fills the silhouette without a hard cull edge in the sky.
+const HORIZON_K = 2.5;
 
 interface Node {
   level: number;
@@ -215,17 +220,16 @@ export default function TileField({ voxelSize, focus, bounds, workers, inbox, on
     const lookDist = Math.min(altY / Math.tan(pitch), maxRadius);
     const rx = ex + fwx * lookDist;
     const rz = ez - fwz * lookDist;
-    // Three distance bands from R, radii scaling with the L0 cell size so the on-screen
-    // tile count stays ~constant at every altitude: band0=L0 (a fat near disk),
-    // band1=L0+1, band2=L0+2; beyond band2 is culled and the haze hides the cut.
-    const band0 = lodBandCells * cellAt(L0);
-    const band1 = 2 * band0;
-    const band2 = Math.min(4 * band0, maxRadius);
-    // Drive the radial haze (centred on the eye) from the band reach so the cull edge
-    // always dissolves into the Skydome: it closes in when zoomed in (tight detailed
-    // bubble) and recedes to the region rim when zoomed out.
-    curveUniforms.uFogNearR.value = lookDist + band1;
-    curveUniforms.uFogFarR.value = lookDist + band2;
+    // Fat fine disk: render at L0 within band0 of R, then coarsen with distance. band0
+    // scales by a CONTINUOUS altitude-proportional cell size (cellCont ≈ cellAt(L0) but
+    // without the discrete round()), so the disk and the coverage glide with zoom/pan
+    // instead of doubling each time L0 ticks over a threshold.
+    const cellCont = C0 * (altY / minAltitude);
+    const band0 = lodBandCells * cellCont;
+    // Render out to (just past) the round-world horizon so the far terrain curves down
+    // to a clean edge against the starfield; bounded by maxRadius. Falls back to the
+    // full region radius if curvature is disabled.
+    const coverRadius = Math.min(maxRadius, HORIZON_K * Math.sqrt(altY / Math.max(mapTheme.curvature, 1e-6)));
 
     // Walk the quadtree from the roots covering the view; mark visited + split,
     // and collect any cell that needs voxelizing.
@@ -236,7 +240,7 @@ export default function TileField({ voxelSize, focus, bounds, workers, inbox, on
       const minZ = iz * cell;
       const maxX = minX + cell;
       const maxZ = minZ + cell;
-      if (maxX <= wMinX || minX >= wMaxX || maxZ <= wMinZ || minZ >= wMaxZ) return; // off-map
+      const offMap = maxX <= wMinX || minX >= wMaxX || maxZ <= wMinZ || minZ >= wMaxZ;
       const key = `${L}_${ix}_${iz}`;
       let n = map.get(key);
       if (!n) {
@@ -244,6 +248,16 @@ export default function TileField({ voxelSize, focus, bounds, workers, inbox, on
         map.set(key, n);
       }
       n.visited = true;
+      // Off-map cells (past the region edge) count as covered but draw nothing. A
+      // boundary parent whose children are partly off-map must still be able to hand
+      // off to its on-map children; if off-map children were skipped entirely they'd
+      // read as "not covered", so the parent would stay coarse and the edge never
+      // refines. Treat them like culled cells (covered, no mesh).
+      if (offMap) {
+        n.culled = true;
+        n.shouldSplit = false;
+        return;
+      }
       const cx = (ix + 0.5) * cell;
       const cz = (iz + 0.5) * cell;
       // Cull when the whole cell is behind the camera, OR beyond the 3-band reach
@@ -251,15 +265,16 @@ export default function TileField({ voxelSize, focus, bounds, workers, inbox, on
       // the bands isn't dropped). Culled cells draw nothing — the haze covers them.
       const dh = Math.hypot(cx - rx, cz - rz);
       const behind = (cx - ex) * fwx + (ez - cz) * fwz < -(BACK_MARGIN + cell);
-      n.culled = behind || dh - cell >= band2;
+      n.culled = behind || dh - cell >= coverRadius;
       if (n.culled) {
         n.shouldSplit = false;
         return;
       }
-      // Target level for this cell's distance from R: L0 (near — the fat fine disk),
-      // L0+1, L0+2 outward. Coarse roots split DOWN to their target, so the whole
-      // near/mid field renders at the altitude-appropriate finest level (not a dot).
-      const targetLevel = L0 + (dh < band0 ? 0 : dh < band1 ? 1 : 2);
+      // Target level: L0 inside the fine disk (dh ≤ band0), coarsening one level per
+      // doubling of distance beyond it, up to the coarsest. So the near/mid field is the
+      // altitude-appropriate finest level (a fat disk, not a dot) and the far field
+      // coarsens with distance to the horizon.
+      const targetLevel = Math.min(lodLevels - 1, L0 + Math.max(0, Math.round(Math.log2(dh / band0))));
       n.shouldSplit = L > targetLevel;
       if (!n.mesh && !n.requested) req.push({ key, level: L, d: dh });
       if (n.shouldSplit) {
@@ -270,11 +285,11 @@ export default function TileField({ voxelSize, focus, bounds, workers, inbox, on
       }
     };
 
-    // Scan the coarse roots covering the band region around R (not the whole eye
-    // radius): zoomed in band2 is small so this is a handful of roots; zoomed out it
-    // grows to the region. The per-cell band cull above prunes anything beyond band2.
+    // Scan the coarse roots covering the visible region around R (out to the horizon):
+    // zoomed in coverRadius is small so this is a handful of roots; zoomed out it grows
+    // to the region. The per-cell cull above prunes anything beyond coverRadius.
     const rootCell = cellAt(Lmax);
-    const scanR = band2 + rootCell;
+    const scanR = coverRadius + rootCell;
     const i0 = Math.floor((rx - scanR) / rootCell);
     const i1 = Math.floor((rx + scanR) / rootCell);
     const k0 = Math.floor((rz - scanR) / rootCell);
@@ -283,7 +298,7 @@ export default function TileField({ voxelSize, focus, bounds, workers, inbox, on
     for (let ix = i0; ix <= i1; ix++) {
       for (let iz = k0; iz <= k1; iz++) {
         const d = Math.hypot((ix + 0.5) * rootCell - rx, (iz + 0.5) * rootCell - rz);
-        if (d - rootCell > band2) continue;
+        if (d - rootCell > coverRadius) continue;
         visit(Lmax, ix, iz);
         if (map.get(`${Lmax}_${ix}_${iz}`)?.visited) roots.push(`${Lmax}_${ix}_${iz}`);
       }

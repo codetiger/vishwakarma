@@ -9,9 +9,10 @@
 export interface MapTheme {
   palette: {
     water: string;
+    /** Deep-space backdrop: skyTop = zenith (near-black), skyHorizon = a touch lighter
+     *  low in the sky. Both dark — the starfield is the feature, not a gradient. */
     skyTop: string;
     skyHorizon: string;
-    fog: string;
   };
   lighting: {
     keyColor: string;
@@ -86,10 +87,6 @@ export interface MapTheme {
     maxAltitude: number;
     /** Downward look angle, radians (fixed pitch — terrain-independent aim). */
     pitch: number;
-    /** Radial fog start/end (world units from focus). fogFar ≲ maxRadius so the
-     *  far coarse terrain fades gently into the amber horizon. */
-    fogNear: number;
-    fogFar: number;
     /** Guard on how fine the slider may go (per-cell dense-grid budget). */
     maxCellVoxels: number;
     /** Neighbour radius (in voxels) for the per-voxel colour cross-fade baked in
@@ -99,9 +96,9 @@ export interface MapTheme {
     colorBlendRadius: number;
     /** Eye inset from the map edge (world units), fixed at every zoom so the
      *  framing doesn't jump as you zoom and coastal regions stay reachable.
-     *  Small enough to roam right up to the coast; the world rim beyond is
-     *  dissolved by the round-world curvature + radial fog. Auto-capped to 40%
-     *  of each span. */
+     *  Small enough to roam right up to the coast; the world rim beyond curves
+     *  down (round-world shader) into the starfield. Auto-capped to 40% of each
+     *  span. */
     edgeMargin: number;
   };
 }
@@ -110,9 +107,8 @@ export interface MapTheme {
 export const mapTheme: MapTheme = {
   palette: {
     water: '#27496b', // deep indigo water
-    skyTop: '#0a0e1a', // the void
-    skyHorizon: '#e3a25c', // amber dusk
-    fog: '#b5895f', // dusky amber dissolving the rim
+    skyTop: '#01030a', // the void at zenith
+    skyHorizon: '#070b18', // a touch lighter low in the sky (subtle, the stars carry it)
   },
   lighting: {
     keyColor: '#ffe1b0', // low moon-gold key
@@ -158,8 +154,6 @@ export const mapTheme: MapTheme = {
     minAltitude: 1.5, // closest the eye flies above ground → LOD shows the finest level (L0=0)
     maxAltitude: 100, // coarse-overview ceiling → LOD shows the coarsest of its 3 levels
     pitch: 0.95, // ~54° down — Google-Earth-like tilt
-    fogNear: 90,
-    fogFar: 320,
     maxCellVoxels: 30_000_000,
     colorBlendRadius: 2,
     edgeMargin: 30,
