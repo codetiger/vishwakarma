@@ -120,8 +120,8 @@ export default function App() {
       )}
 
       <div className="panel">
-        <h1>Vishwakarma · India</h1>
-        <p className="sub">Real terrain voxelized in the browser from a streamed Web-Mercator height-tile pyramid, with distance LOD as you roam.</p>
+        <h1>Voxel Terrain Viewer</h1>
+        <p className="sub">Explore real-world terrain as voxels, right in your browser. Elevation data streams in and rebuilds into a 3D landscape as you move, and more detail loads the closer you look.</p>
         {status === 'ready' && (
           <div className="control">
             <label>Height exaggeration · {heightExag}×</label>
@@ -136,6 +136,7 @@ export default function App() {
           </div>
         )}
         {status === 'error' && <p className="status err">Error: {error}</p>}
+        <a className="repo" href="https://github.com/codetiger/vishwakarma" target="_blank" rel="noreferrer">View on GitHub ↗</a>
       </div>
     </div>
   );

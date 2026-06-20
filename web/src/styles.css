@@ -76,6 +76,18 @@ body,
   cursor: pointer;
 }
 
+.panel .repo {
+  display: inline-block;
+  margin-top: 14px;
+  font-size: 12px;
+  color: var(--amber);
+  text-decoration: none;
+}
+
+.panel .repo:hover {
+  text-decoration: underline;
+}
+
 .status {
   margin: 12px 0 0;
   font-size: 12px;
