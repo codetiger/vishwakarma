@@ -1,9 +1,8 @@
 # gen_pyramid — Web-Mercator height-tile pyramid
 
 Offline tool that turns the ETOPO 2022 DEM into a streamable **height-tile
-pyramid** for the voxel web viewer. The viewer's JS worker fetches tiles and
-builds voxels itself — there is **no Rust/wasm on the web path** (full design in
-`docs/phase1-raster-base.md`).
+pyramid** for the voxel web viewer. The viewer's JS workers fetch tiles and
+build voxels themselves — there is **no Rust/wasm on the web path**.
 
 ## Run
 
