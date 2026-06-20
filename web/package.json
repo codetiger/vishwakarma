@@ -1,0 +1,27 @@
+{
+  "name": "vishwakarma-viewer",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Browser voxel terrain viewer: streams a Web-Mercator DEM height-tile pyramid, voxelizes it in a worker, with distance LOD as you roam.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@react-three/fiber": "^9.6.1",
+    "@react-three/postprocessing": "^3.0.4",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "three": "^0.184.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@types/three": "^0.184.1",
+    "@vitejs/plugin-react": "^6.0.2",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.16"
+  }
+}

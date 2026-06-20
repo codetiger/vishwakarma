@@ -1,0 +1,5 @@
+node_modules/
+dist/
+
+# Generated height tiles — rebuild with `python -m gen_pyramid`:
+public/pyramid/

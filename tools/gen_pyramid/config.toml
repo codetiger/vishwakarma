@@ -1,0 +1,27 @@
+# Configuration for the height-tile pyramid generator.
+
+[region]
+# Bounding box fetched from the DEM (Afghanistan → Maldives by default).
+min_lon = 60.0
+min_lat = -1.0
+max_lon = 98.0
+max_lat = 38.0
+
+[dem]
+# ETOPO 2022 (public domain, NOAA NCEI). 15″ tiled mosaic (≈460 m) or 30″/60″
+# single global file (windowed). Only the bbox is fetched, then cached.
+resolution = "15s"
+tile_base = "https://www.ngdc.noaa.gov/mgg/global/relief/ETOPO2022/data/15s/15s_surface_elev_gtif"
+url_30s = "https://www.ngdc.noaa.gov/mgg/global/relief/ETOPO2022/data/30s/30s_surface_elev_gtif/ETOPO_2022_v1_30s_N90W180_surface.tif"
+url_60s = "https://www.ngdc.noaa.gov/mgg/global/relief/ETOPO2022/data/60s/60s_surface_elev_gtif/ETOPO_2022_v1_60s_N90W180_surface.tif"
+target_arcsec = 20         # resample the 15″ mosaic to this (≈ 617 m)
+
+[pyramid]
+# Web-Mercator height-tile pyramid (z=0 coarsest, sparse, written to web/public/pyramid/).
+min_zoom = 1          # coarse base — far field is a handful of big cells
+max_zoom = 6          # res(6) ≈ 2.4 km/sample; raise toward DEM-native or to upsample
+tile_samples = 256    # N: interior height samples per tile edge
+border = 2            # B: overlap ring (>= AO radius) so tiles self-seam
+height_scale = 1.0    # metres per i16 code (±32767 m covers Earth)
+height_offset = 0.0
+gzip = false          # write raw .bin for the POC; gzip at the serve/CDN layer

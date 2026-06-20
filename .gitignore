@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+
+# Downloaded/cached DEM + intermediate rasters
+tools/**/_cache/
+
+# Web viewer
+web/node_modules/
+web/dist/
+
+# Generated height tiles — rebuild with `python -m gen_pyramid`
+web/public/pyramid/
+
+# macOS
+.DS_Store
+**/.DS_Store
