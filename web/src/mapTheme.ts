@@ -157,12 +157,12 @@ export const mapTheme: MapTheme = {
     // cellCols²). Trade-off: more tiles ⇒ more draw calls and a thicker apron share
     // per tile — bump back toward 12–16 if draw-call count hurts the frame rate.
     lodLevels: 6, // overwritten at load from the manifest zoom span (App.tsx)
-    lodBandCells: 12, // finest-disk radius in cells; bigger = more fine area + more tiles
-    lodBias: 3, // detail appears ~2 octaves (≈67% zoom) earlier; 3 ≈ the 50% zoom midpoint but ~4× heavier
+    lodBandCells: 8, // finest-disk radius in cells; bigger = more fine area + more tiles
+    lodBias: 2, // detail appears ~2 octaves (≈67% zoom) earlier; 3 ≈ the 50% zoom midpoint but ~4× heavier
     maxRadius: 360,
     cameraHeight: 30, // base eye altitude above terrain (zoom scales it)
-    minAltitude: 10, // closest the eye flies above ground → LOD shows the finest level (L0=0)
-    maxAltitude: 70, // coarse-overview ceiling → LOD shows the coarsest of its 3 levels
+    minAltitude: 5, // closest the eye flies above ground → LOD shows the finest level (L0=0)
+    maxAltitude: 80, // coarse-overview ceiling → LOD shows the coarsest of its 3 levels
     pitch: 0.95, // ~54° down — Google-Earth-like tilt
     maxCellVoxels: 30_000_000,
     colorBlendRadius: 2,

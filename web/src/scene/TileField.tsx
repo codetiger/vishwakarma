@@ -225,8 +225,14 @@ export default function TileField({ voxelSize, focus, bounds, workers, inbox, on
     // Fat fine disk: render at L0 within band0 of R, then coarsen with distance. band0
     // scales by a CONTINUOUS altitude-proportional cell size (cellCont ≈ cellAt(L0) but
     // without the discrete round()), so the disk and the coverage glide with zoom/pan
-    // instead of doubling each time L0 ticks over a threshold.
-    const cellCont = C0 * (altY / minAltitude);
+    // instead of doubling each time L0 ticks over a threshold. cellCont MUST track L0's
+    // own curve — same `- lodBias` shift and the SAME clamp — else the disk decouples
+    // from the rendered cell size: with lodBias it runs 2^lodBias too wide (16× the
+    // fine-cell count at lodBias=2), and once L0 pins to the finest level the disk keeps
+    // growing linearly with altitude, carpeting the whole view in finest cells the
+    // higher you fly. Mirror L0's clamp so the fine-cell count stays ~constant.
+    const contLevel = THREE.MathUtils.clamp(Math.log2(altY / minAltitude) - lodBias, 0, lodLevels - 3);
+    const cellCont = C0 * 2 ** contLevel;
     const band0 = lodBandCells * cellCont;
     // Render out to (just past) the round-world horizon so the far terrain curves down
     // to a clean edge against the starfield; bounded by maxRadius. Falls back to the
