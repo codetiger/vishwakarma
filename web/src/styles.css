@@ -48,6 +48,7 @@ body,
 
 .panel h1 {
   margin: 0;
+  padding-right: 28px;
   font-size: 18px;
   font-weight: 600;
   letter-spacing: 0.02em;
@@ -77,15 +78,17 @@ body,
 }
 
 .panel .repo {
-  display: inline-block;
-  margin-top: 14px;
-  font-size: 12px;
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  display: inline-flex;
   color: var(--amber);
-  text-decoration: none;
+  opacity: 0.75;
+  transition: opacity 0.15s ease;
 }
 
 .panel .repo:hover {
-  text-decoration: underline;
+  opacity: 1;
 }
 
 .status {
