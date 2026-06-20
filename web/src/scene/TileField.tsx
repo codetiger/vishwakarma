@@ -138,7 +138,7 @@ export default function TileField({ voxelSize, focus, bounds, workers, inbox, on
   useFrame(() => {
     const group = groupRef.current;
     if (!group) return;
-    const { baseVoxel, cellCols, maxRadius, lodLevels, lodBandCells, minAltitude, pitch } = mapTheme.view;
+    const { baseVoxel, cellCols, maxRadius, lodLevels, lodBandCells, minAltitude, pitch, lodBias } = mapTheme.view;
     const [wMinX, wMinZ, wMaxX, wMaxZ] = bounds;
     const s = voxelSize;
     const ex = focus.current.x;
@@ -212,8 +212,10 @@ export default function TileField({ voxelSize, focus, bounds, workers, inbox, on
     // L0 = the finest level shown anywhere. Descend → L0 drops → the whole visible
     // field sharpens uniformly. minAltitude calibrates L0=0 (finest) at the lowest the
     // camera flies; cap at lodLevels-3 so L0, L0+1, L0+2 all stay ≤ Lmax.
+    // lodBias shifts the curve finer by N octaves so detail engages EARLIER (at higher
+    // altitude) — finest is then reached ~lodBias octaves of zoom sooner.
     const altY = Math.max(camera.position.y - terrainHeight(ex, ez), 0.001);
-    const L0 = THREE.MathUtils.clamp(Math.round(Math.log2(altY / minAltitude)), 0, lodLevels - 3);
+    const L0 = THREE.MathUtils.clamp(Math.round(Math.log2(altY / minAltitude)) - lodBias, 0, lodLevels - 3);
     // Reference point R = the ground point at SCREEN-CENTRE. In the (vertically
     // exaggerated) scene the centre ray hits the ground altY/tan(pitch) ahead — raw
     // scene units — so the detail lands out in front where you look, not under the eye.

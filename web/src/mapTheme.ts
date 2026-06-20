@@ -76,6 +76,15 @@ export interface MapTheme {
      *  the band-radius unit for the 3-level clipmap. Bigger = a larger fine area
      *  on screen and proportionally more streamed cells. */
     lodBandCells: number;
+    /** Bring the finest detail in EARLIER (at higher altitude) by this many octaves,
+     *  so tiles sharpen sooner as you zoom in instead of only at deep zoom. Each +1
+     *  shifts the whole altitude→level curve one notch finer, i.e. the finest level
+     *  (and every level) engages at ~2× the altitude. Reference points for this
+     *  pyramid's zoom range: `0` = default (finest only near minAltitude, ~full
+     *  zoom); `2` ≈ finest at ~67% zoom; `3` ≈ finest at the 50% zoom midpoint.
+     *  HEAVY: the fine disk grows with altitude, so each +1 roughly QUADRUPLES the
+     *  finest-disk cell/draw-call count — raise with care. */
+    lodBias: number;
     /** Load cells out to this radius from the focus (≈ camera far reach). */
     maxRadius: number;
     /** Eye height above the (smoothed) terrain directly beneath it. */
@@ -106,16 +115,16 @@ export interface MapTheme {
 // Celestial Manuscript — the map at golden dusk falling into a cosmic night.
 export const mapTheme: MapTheme = {
   palette: {
-    water: '#27496b', // deep indigo water
-    skyTop: '#01030a', // the void at zenith
-    skyHorizon: '#070b18', // a touch lighter low in the sky (subtle, the stars carry it)
+    water: "#27496b", // deep indigo water
+    skyTop: "#01030a", // the void at zenith
+    skyHorizon: "#070b18", // a touch lighter low in the sky (subtle, the stars carry it)
   },
   lighting: {
-    keyColor: '#ffe1b0', // low moon-gold key
+    keyColor: "#ffe1b0", // low moon-gold key
     keyIntensity: 1.35,
     ambient: 0.4,
-    hemiSky: '#cdd6f4', // cool starlight from above
-    hemiGround: '#2a2438', // violet ground bounce
+    hemiSky: "#cdd6f4", // cool starlight from above
+    hemiGround: "#2a2438", // violet ground bounce
     hemiIntensity: 0.55,
   },
   post: {
@@ -132,7 +141,7 @@ export const mapTheme: MapTheme = {
       radiusVoxels: 2.5,
       distanceFalloff: 1.0,
       halfRes: true,
-      color: '#2a2438', // violet ground bounce (matches hemiGround)
+      color: "#2a2438", // violet ground bounce (matches hemiGround)
     },
     aoFloor: 0.55,
   },
@@ -148,11 +157,12 @@ export const mapTheme: MapTheme = {
     // cellCols²). Trade-off: more tiles ⇒ more draw calls and a thicker apron share
     // per tile — bump back toward 12–16 if draw-call count hurts the frame rate.
     lodLevels: 6, // overwritten at load from the manifest zoom span (App.tsx)
-    lodBandCells: 6, // finest-disk radius in cells; bigger = more fine area + more tiles
+    lodBandCells: 12, // finest-disk radius in cells; bigger = more fine area + more tiles
+    lodBias: 3, // detail appears ~2 octaves (≈67% zoom) earlier; 3 ≈ the 50% zoom midpoint but ~4× heavier
     maxRadius: 360,
     cameraHeight: 30, // base eye altitude above terrain (zoom scales it)
-    minAltitude: 1.5, // closest the eye flies above ground → LOD shows the finest level (L0=0)
-    maxAltitude: 100, // coarse-overview ceiling → LOD shows the coarsest of its 3 levels
+    minAltitude: 10, // closest the eye flies above ground → LOD shows the finest level (L0=0)
+    maxAltitude: 70, // coarse-overview ceiling → LOD shows the coarsest of its 3 levels
     pitch: 0.95, // ~54° down — Google-Earth-like tilt
     maxCellVoxels: 30_000_000,
     colorBlendRadius: 2,
