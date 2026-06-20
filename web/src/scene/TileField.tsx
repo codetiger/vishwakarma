@@ -2,7 +2,7 @@ import { useMemo, useRef } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
 import * as THREE from 'three';
 import { mapTheme } from '../mapTheme';
-import { applyWorldCurvature } from './curvature';
+import { applyWorldCurvature, curveUniforms } from './curvature';
 import { terrainHeight } from '../terrain';
 import type { FromWorker, ToWorker, TileResult } from '../voxelTypes';
 
@@ -27,27 +27,18 @@ type TileMsg = Extract<FromWorker, { type: 'tile' }>;
 
 const UNIT = new THREE.BoxGeometry(1, 1, 1);
 const WORKER_DEPTH = 2; // outstanding tiles per pool worker (1 running + 1 queued, so none idle)
-const MAX_LEVELS = 6;
-// Split a cell when the 3D distance from the camera reference to its center is
-// under this × the cell's world size — so detail sharpens toward the camera and
-// coarsens with distance. It also sets the finest size reached at full zoom-in:
-// the look-at foreground sits ~`altitude` from the reference, reaching level 0
-// (voxel = the slider size `s`) once `altitude < SPLIT_FACTOR × 32 × s`.
-// RoamControls' min altitude is ≈ cameraHeight × ZOOM_MIN ≈ 12, so at 2.2 the
-// 0.3 default resolves fully; finer sizes resolve at lower altitude. Raising it
-// reaches finer sizes sooner but multiplies the tiles the worker must stream —
-// keep it modest so streaming stays smooth.
-const SPLIT_FACTOR = 2.2;
-// Extra, altitude-INDEPENDENT refinement around the look-at: a cell also splits
-// while its HORIZONTAL distance from the look-at is under this × its size. This
-// guarantees the ground right where you look always reaches level 0 (= the
-// selected voxel size) at any zoom, so the slider always has a visible effect —
-// without it, camera altitude caps the foreground at a coarse level and fine
-// sizes do nothing. Tied to the cell size, so the fine patch is a bounded cell
-// count (≈ π·FINE_FACTOR² level-0 cells) however fine the voxel size gets, and
-// it gives a smooth voxel ∝ horizontal-distance falloff out from the look-at.
-// 5.0 = 2× the foreground fine radius of the original 2.5 (≈4× the fine cells).
-const FINE_FACTOR = 5.0;
+// Quadtree depth is mapTheme.view.lodLevels — set at load from the manifest's zoom
+// span so the clipmap always has exactly enough levels to bridge the finest voxel
+// (maxZoom) up to the whole-area coarse base (minZoom).
+//
+// LOD model (altitude-driven, Google-Earth style): the camera ALTITUDE picks a base
+// level L0 = the finest level shown anywhere; descend → L0 drops → the WHOLE visible
+// field sharpens uniformly. Around the look-at R we render just 3 levels in distance
+// bands — L0 (a fat near disk), L0+1, L0+2 — and cull beyond, letting the radial haze
+// dissolve the cut edge into the Skydome. The band radii scale with the cell size, so
+// the on-screen tile count stays ~constant at every altitude (the cells just get
+// physically finer as you descend). This sidesteps the ~55× vertical exaggeration
+// that makes a pure screen-space-error metric unable to ever reach the fine levels.
 const BACK_MARGIN = 40; // world units behind the camera kept before culling
 
 interface Node {
@@ -142,7 +133,7 @@ export default function TileField({ voxelSize, focus, bounds, workers, inbox, on
   useFrame(() => {
     const group = groupRef.current;
     if (!group) return;
-    const { baseVoxel, cellCols, maxRadius } = mapTheme.view;
+    const { baseVoxel, cellCols, maxRadius, lodLevels, lodBandCells, minAltitude, pitch } = mapTheme.view;
     const [wMinX, wMinZ, wMaxX, wMaxZ] = bounds;
     const s = voxelSize;
     const ex = focus.current.x;
@@ -179,7 +170,7 @@ export default function TileField({ voxelSize, focus, bounds, workers, inbox, on
     }
 
     const C0 = cellCols * s; // level-0 cell world size
-    const Lmax = Math.min(MAX_LEVELS - 1, Math.max(0, Math.round(Math.log2(Math.max(baseVoxel / s, 1)))));
+    const Lmax = Math.min(lodLevels - 1, Math.max(0, Math.round(Math.log2(Math.max(baseVoxel / s, 1)))));
     const cellAt = (L: number) => C0 * 2 ** L;
     const voxelAt = (L: number) => s * 2 ** L;
     const childKeys = (L: number, ix: number, iz: number) => [
@@ -212,18 +203,29 @@ export default function TileField({ voxelSize, focus, bounds, workers, inbox, on
     const flen = Math.hypot(fwd.current.x, fwd.current.z) || 1;
     const fwx = fwd.current.x / flen;
     const fwz = fwd.current.z / flen;
-    // LOD reference point R: over the ground point the camera LOOKS at (ahead of
-    // the eye by the oblique look distance, clamped so it never runs off to the
-    // horizon). Anchoring R over the look-at — not the eye — keeps the finest
-    // detail in the visible foreground rather than under the camera (which falls
-    // off the bottom of the screen at this tilt). `altitude` is the vertical leg
-    // of the camera→tile distance below, folding zoom into the LOD with one cheap
-    // term — no per-cell terrain sampling. World forward is the display forward
-    // with z un-negated.
-    const altitude = Math.max(camera.position.y - terrainHeight(ex, ez), 1);
-    const lookDist = Math.min(altitude / Math.tan(mapTheme.view.pitch), maxRadius);
+    // Altitude above the ground beneath the eye (scene Y units). This DRIVES the LOD:
+    // L0 = the finest level shown anywhere. Descend → L0 drops → the whole visible
+    // field sharpens uniformly. minAltitude calibrates L0=0 (finest) at the lowest the
+    // camera flies; cap at lodLevels-3 so L0, L0+1, L0+2 all stay ≤ Lmax.
+    const altY = Math.max(camera.position.y - terrainHeight(ex, ez), 0.001);
+    const L0 = THREE.MathUtils.clamp(Math.round(Math.log2(altY / minAltitude)), 0, lodLevels - 3);
+    // Reference point R = the ground point at SCREEN-CENTRE. In the (vertically
+    // exaggerated) scene the centre ray hits the ground altY/tan(pitch) ahead — raw
+    // scene units — so the detail lands out in front where you look, not under the eye.
+    const lookDist = Math.min(altY / Math.tan(pitch), maxRadius);
     const rx = ex + fwx * lookDist;
     const rz = ez - fwz * lookDist;
+    // Three distance bands from R, radii scaling with the L0 cell size so the on-screen
+    // tile count stays ~constant at every altitude: band0=L0 (a fat near disk),
+    // band1=L0+1, band2=L0+2; beyond band2 is culled and the haze hides the cut.
+    const band0 = lodBandCells * cellAt(L0);
+    const band1 = 2 * band0;
+    const band2 = Math.min(4 * band0, maxRadius);
+    // Drive the radial haze (centred on the eye) from the band reach so the cull edge
+    // always dissolves into the Skydome: it closes in when zoomed in (tight detailed
+    // bubble) and recedes to the region rim when zoomed out.
+    curveUniforms.uFogNearR.value = lookDist + band1;
+    curveUniforms.uFogFarR.value = lookDist + band2;
 
     // Walk the quadtree from the roots covering the view; mark visited + split,
     // and collect any cell that needs voxelizing.
@@ -244,26 +246,21 @@ export default function TileField({ voxelSize, focus, bounds, workers, inbox, on
       n.visited = true;
       const cx = (ix + 0.5) * cell;
       const cz = (iz + 0.5) * cell;
-      // Cull only when the WHOLE cell is behind the camera (center minus its own
-      // size), so a large cell straddling the camera isn't dropped — that left a
-      // flickering void strip in front. Culled cells keep their mesh as a fallback
-      // for turning back, but aren't refined/requested/drawn.
-      n.culled = (cx - ex) * fwx + (ez - cz) * fwz < -(BACK_MARGIN + cell);
+      // Cull when the whole cell is behind the camera, OR beyond the 3-band reach
+      // (distance from R, using the cell's own size as margin so a big root straddling
+      // the bands isn't dropped). Culled cells draw nothing — the haze covers them.
+      const dh = Math.hypot(cx - rx, cz - rz);
+      const behind = (cx - ex) * fwx + (ez - cz) * fwz < -(BACK_MARGIN + cell);
+      n.culled = behind || dh - cell >= band2;
       if (n.culled) {
         n.shouldSplit = false;
         return;
       }
-      // A cell refines for either of two reasons:
-      //  • 3D camera distance (horizontal-from-look-at + altitude) under
-      //    SPLIT_FACTOR × cell — the zoom-coupled term that coarsens the whole
-      //    field as the camera rises; and
-      //  • HORIZONTAL distance from the look-at under FINE_FACTOR × cell — an
-      //    altitude-independent term that guarantees the ground you're looking at
-      //    always reaches level 0 = the selected voxel size, so the slider always
-      //    bites (otherwise altitude caps the foreground at a coarse level).
-      const dh = Math.hypot(cx - rx, cz - rz);
-      const d = Math.hypot(dh, altitude);
-      n.shouldSplit = L > 0 && (d < SPLIT_FACTOR * cell || dh < FINE_FACTOR * cell);
+      // Target level for this cell's distance from R: L0 (near — the fat fine disk),
+      // L0+1, L0+2 outward. Coarse roots split DOWN to their target, so the whole
+      // near/mid field renders at the altitude-appropriate finest level (not a dot).
+      const targetLevel = L0 + (dh < band0 ? 0 : dh < band1 ? 1 : 2);
+      n.shouldSplit = L > targetLevel;
       if (!n.mesh && !n.requested) req.push({ key, level: L, d: dh });
       if (n.shouldSplit) {
         visit(L - 1, 2 * ix, 2 * iz);
@@ -273,16 +270,20 @@ export default function TileField({ voxelSize, focus, bounds, workers, inbox, on
       }
     };
 
+    // Scan the coarse roots covering the band region around R (not the whole eye
+    // radius): zoomed in band2 is small so this is a handful of roots; zoomed out it
+    // grows to the region. The per-cell band cull above prunes anything beyond band2.
     const rootCell = cellAt(Lmax);
-    const i0 = Math.floor((ex - maxRadius) / rootCell);
-    const i1 = Math.floor((ex + maxRadius) / rootCell);
-    const k0 = Math.floor((ez - maxRadius) / rootCell);
-    const k1 = Math.floor((ez + maxRadius) / rootCell);
+    const scanR = band2 + rootCell;
+    const i0 = Math.floor((rx - scanR) / rootCell);
+    const i1 = Math.floor((rx + scanR) / rootCell);
+    const k0 = Math.floor((rz - scanR) / rootCell);
+    const k1 = Math.floor((rz + scanR) / rootCell);
     const roots: string[] = [];
     for (let ix = i0; ix <= i1; ix++) {
       for (let iz = k0; iz <= k1; iz++) {
-        const d = Math.max(Math.abs((ix + 0.5) * rootCell - ex), Math.abs((iz + 0.5) * rootCell - ez));
-        if (d > maxRadius + rootCell) continue;
+        const d = Math.hypot((ix + 0.5) * rootCell - rx, (iz + 0.5) * rootCell - rz);
+        if (d - rootCell > band2) continue;
         visit(Lmax, ix, iz);
         if (map.get(`${Lmax}_${ix}_${iz}`)?.visited) roots.push(`${Lmax}_${ix}_${iz}`);
       }

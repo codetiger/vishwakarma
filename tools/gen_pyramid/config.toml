@@ -14,12 +14,12 @@ resolution = "15s"
 tile_base = "https://www.ngdc.noaa.gov/mgg/global/relief/ETOPO2022/data/15s/15s_surface_elev_gtif"
 url_30s = "https://www.ngdc.noaa.gov/mgg/global/relief/ETOPO2022/data/30s/30s_surface_elev_gtif/ETOPO_2022_v1_30s_N90W180_surface.tif"
 url_60s = "https://www.ngdc.noaa.gov/mgg/global/relief/ETOPO2022/data/60s/60s_surface_elev_gtif/ETOPO_2022_v1_60s_N90W180_surface.tif"
-target_arcsec = 20         # resample the 15″ mosaic to this (≈ 617 m)
+target_arcsec = 15         # resample the 15″ mosaic to this (native ≈ 463 m)
 
 [pyramid]
 # Web-Mercator height-tile pyramid (z=0 coarsest, sparse, written to web/public/pyramid/).
 min_zoom = 1          # coarse base — far field is a handful of big cells
-max_zoom = 6          # res(6) ≈ 2.4 km/sample; raise toward DEM-native or to upsample
+max_zoom = 9          # res(9) ≈ 305 m/sample — captures the DEM-native 15″ (≈463 m) detail
 tile_samples = 256    # N: interior height samples per tile edge
 border = 2            # B: overlap ring (>= AO radius) so tiles self-seam
 height_scale = 1.0    # metres per i16 code (±32767 m covers Earth)

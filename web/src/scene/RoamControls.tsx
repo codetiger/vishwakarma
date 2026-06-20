@@ -7,13 +7,13 @@ import { terrainHeight } from "../terrain";
 
 // Google-Earth-style oblique roam. The eye flies at a fixed altitude above the
 // (smoothed) terrain, tilted down at a constant pitch — drag or WASD pan it
-// across the map, shift/right-drag or Q/E turn the heading. No zoom. The eye XZ
+// across the map, shift-drag or Q/E turn the heading (right-click is inert). The eye XZ
 // is the LOD/fog center, so detail is densest in the near foreground and coarsens
 // into the distance. The scene stores z south-up, so the rendered terrain is
 // z-negated (north up); the camera, look target, and fog center are negated to
 // match, while the eye published for LOD/height stays in true world space.
 
-const { cameraHeight, pitch, edgeMargin } = mapTheme.view;
+const { cameraHeight, pitch, edgeMargin, minAltitude, maxAltitude } = mapTheme.view;
 const PAN_SPEED = 0.0133; // drag pixel → world impulse (scaled by zoom below)
 const KEY_SPEED = 5.3; // world units / second under WASD (scaled by zoom)
 const ROTATE_SPEED = 0.005; // drag pixel → heading impulse
@@ -22,15 +22,16 @@ const DAMP = 0.84; // per-frame velocity decay
 const Y_LERP = 0.08; // height smoothing toward target (lower = smoother)
 const SAMPLE_R = 8; // radius of the height-averaging disk (world units)
 const SAMPLE_N = 8; // samples on the disk
-const CLEARANCE = 3; // min gap kept above the highest nearby terrain
+const CLEARANCE = 1; // min gap kept above the highest nearby terrain (low so the eye can drop in)
 const LOOK_DIST = 100; // distance to the aim point along the heading
 const TAU = Math.PI * 2;
-// Wheel zoom moves the camera Y: altitude = cameraHeight × zoom, clamped.
+// Wheel zoom moves the camera Y: altitude = cameraHeight × zoom, clamped to the
+// theme's [minAltitude, maxAltitude]. The low end reaches the LOD's finest level
+// (L0=0); the high end is a coarse overview. ZOOM bounds are derived so the wheel
+// spans exactly that altitude range.
 const ZOOM_SPEED = 0.0012; // wheel delta → zoom factor change
-const ZOOM_MIN = 0.4;
-const ZOOM_MAX = 2.2; // max zoom-out altitude = cameraHeight × this
-const MIN_ALT = 10;
-const MAX_ALT = 130;
+const ZOOM_MIN = minAltitude / cameraHeight; // fully zoomed in → altitude = minAltitude
+const ZOOM_MAX = maxAltitude / cameraHeight; // fully zoomed out → altitude = maxAltitude
 
 interface Props {
   focus: React.MutableRefObject<THREE.Vector3>; // shared LOD/fog center = the eye (world)
@@ -73,8 +74,9 @@ export default function RoamControls({ focus, bounds }: Props) {
     };
 
     const onPointerDown = (e: PointerEvent) => {
+      if (e.button === 2) return; // right-click is inert — it must not rotate (or pan) the camera
       dragging.current = true;
-      rotateMode.current = e.shiftKey || e.button === 2;
+      rotateMode.current = e.shiftKey; // rotation only via shift-drag (and Q/E keys)
       last.current = { x: e.clientX, y: e.clientY };
       el.setPointerCapture?.(e.pointerId);
     };
@@ -193,8 +195,8 @@ export default function RoamControls({ focus, bounds }: Props) {
     const g = sampleGround(eye.x, eye.z);
     const altitude = THREE.MathUtils.clamp(
       cameraHeight * zoom.current,
-      MIN_ALT,
-      MAX_ALT,
+      minAltitude,
+      maxAltitude,
     );
     const target = g.avg + altitude;
     camY.current =

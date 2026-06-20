@@ -65,10 +65,25 @@ export interface MapTheme {
      *  coarser levels get proportionally bigger cells — the far field is a handful
      *  of big coarse cells, not thousands of small ones. */
     cellCols: number;
+    /** Quadtree LOD depth = number of zoom levels the clipmap bridges from the
+     *  finest voxel (maxZoom) up to the whole-area coarse base (minZoom). Set at
+     *  load from the manifest's zoom span (`maxZoom − minZoom + 1`) so the coarse
+     *  root cell stays large however deep the pyramid goes — a fixed cap would
+     *  collapse the base into thousands of root cells at high maxZoom. */
+    lodLevels: number;
+    /** Number of cells (per level) the finest LOD disk spans from the look-at, and
+     *  the band-radius unit for the 3-level clipmap. Bigger = a larger fine area
+     *  on screen and proportionally more streamed cells. */
+    lodBandCells: number;
     /** Load cells out to this radius from the focus (≈ camera far reach). */
     maxRadius: number;
     /** Eye height above the (smoothed) terrain directly beneath it. */
     cameraHeight: number;
+    /** Camera altitude range above terrain (world Y units). minAltitude also sets
+     *  the altitude at which the LOD shows the finest level (L0 = 0); maxAltitude
+     *  the coarse-overview ceiling. The wheel zoom maps onto this range. */
+    minAltitude: number;
+    maxAltitude: number;
     /** Downward look angle, radians (fixed pitch — terrain-independent aim). */
     pitch: number;
     /** Radial fog start/end (world units from focus). fogFar ≲ maxRadius so the
@@ -136,8 +151,12 @@ export const mapTheme: MapTheme = {
     // LOD granularity, and a finer reachable voxel size (the min-size budget ∝
     // cellCols²). Trade-off: more tiles ⇒ more draw calls and a thicker apron share
     // per tile — bump back toward 12–16 if draw-call count hurts the frame rate.
+    lodLevels: 6, // overwritten at load from the manifest zoom span (App.tsx)
+    lodBandCells: 6, // finest-disk radius in cells; bigger = more fine area + more tiles
     maxRadius: 360,
     cameraHeight: 30, // base eye altitude above terrain (zoom scales it)
+    minAltitude: 1.5, // closest the eye flies above ground → LOD shows the finest level (L0=0)
+    maxAltitude: 100, // coarse-overview ceiling → LOD shows the coarsest of its 3 levels
     pitch: 0.95, // ~54° down — Google-Earth-like tilt
     fogNear: 90,
     fogFar: 320,
