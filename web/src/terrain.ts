@@ -18,6 +18,13 @@ export interface WorldInfo {
 let proj: Proj | null = null;
 let store: TileStore | null = null;
 let coarseZoom = 0;
+let heightScale = 1; // vertical exaggeration; kept in sync with curveUniforms.uHeightScale
+
+/** Set the vertical-exaggeration multiplier so the camera follows the same
+ *  exaggerated surface the curvature shader renders (set both together). */
+export function setHeightScale(s: number): void {
+  heightScale = s;
+}
 
 /** Load the pyramid for main-thread queries. Returns its world footprint. */
 export async function initTerrain(manifestUrl: string): Promise<WorldInfo> {
@@ -41,9 +48,10 @@ export async function initTerrain(manifestUrl: string): Promise<WorldInfo> {
   };
 }
 
-/** Terrain height h(x, z) in world units (coarse). 0 before load. */
+/** Terrain height h(x, z) in world units (coarse), incl. vertical exaggeration. 0
+ *  before load. */
 export function terrainHeight(x: number, z: number): number {
   if (!proj || !store) return 0;
   const [mx, my] = proj.worldToMerc(x, z);
-  return store.sampleSync(mx, my, coarseZoom) / WORLD_SCALE_Y;
+  return (store.sampleSync(mx, my, coarseZoom) / WORLD_SCALE_Y) * heightScale;
 }

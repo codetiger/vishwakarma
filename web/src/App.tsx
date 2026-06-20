@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import Stage from './scene/Stage';
 import { mapTheme } from './mapTheme';
-import { initTerrain } from './terrain';
+import { initTerrain, setHeightScale } from './terrain';
+import { curveUniforms } from './scene/curvature';
 import type { FromWorker, ToWorker, TileResult } from './voxelTypes';
 
 // Voxelize tiles across a pool of workers (one per spare core, capped) so dense
@@ -21,6 +22,16 @@ export default function App() {
   const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading');
   const [error, setError] = useState<string | null>(null);
   const [bounds, setBounds] = useState<[number, number, number, number] | null>(null);
+  const [heightExag, setHeightExag] = useState(1);
+
+  // Vertical exaggeration: drive the shared shader uniform AND the camera's
+  // terrain-follow scale together, so the terrain re-exaggerates instantly (no
+  // re-voxelize) and the eye stays glued to the new surface.
+  const applyHeightExag = (v: number) => {
+    setHeightExag(v);
+    curveUniforms.uHeightScale.value = v;
+    setHeightScale(v);
+  };
 
   const workersRef = useRef<Worker[]>([]);
   const inbox = useRef<TileResult[]>([]);
@@ -111,6 +122,19 @@ export default function App() {
       <div className="panel">
         <h1>Vishwakarma · India</h1>
         <p className="sub">Real terrain voxelized in the browser from a streamed Web-Mercator height-tile pyramid, with distance LOD as you roam.</p>
+        {status === 'ready' && (
+          <div className="control">
+            <label>Height exaggeration · {heightExag}×</label>
+            <input
+              type="range"
+              min={1}
+              max={16}
+              step={1}
+              value={heightExag}
+              onChange={(e) => applyHeightExag(Number(e.target.value))}
+            />
+          </div>
+        )}
         {status === 'error' && <p className="status err">Error: {error}</p>}
       </div>
     </div>

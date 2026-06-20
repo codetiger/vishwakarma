@@ -15,6 +15,11 @@ import { mapTheme } from '../mapTheme';
 export const curveUniforms = {
   uCurvature: { value: mapTheme.curvature },
   uCenter: { value: new THREE.Vector2(0, 0) },
+  // Vertical exaggeration: every ground vertex's world Y is scaled about sea level
+  // (Y=0) before the curvature bend, so the UI height-scale control re-exaggerates
+  // all terrain instantly with no re-voxelization. Keep terrain.ts's heightScale in
+  // sync (set both together) so the camera follows the exaggerated surface.
+  uHeightScale: { value: 1 },
 };
 
 const CURVE_VERTEX = /* glsl */ `
@@ -23,6 +28,7 @@ const CURVE_VERTEX = /* glsl */ `
     mvPosition = instanceMatrix * mvPosition;
   #endif
   vec4 worldPos = modelMatrix * mvPosition;
+  worldPos.y *= uHeightScale;
   vec2 dCurve = worldPos.xz - uCenter;
   worldPos.y -= uCurvature * dot( dCurve, dCurve );
   mvPosition = viewMatrix * worldPos;
@@ -36,8 +42,9 @@ export function applyWorldCurvature(material: THREE.Material, curvature: number)
     // uCenter updates this material along with every other curved material.
     shader.uniforms.uCurvature = curveUniforms.uCurvature;
     shader.uniforms.uCenter = curveUniforms.uCenter;
+    shader.uniforms.uHeightScale = curveUniforms.uHeightScale;
     shader.vertexShader =
-      `uniform float uCurvature;\nuniform vec2 uCenter;\n${shader.vertexShader}`.replace(
+      `uniform float uCurvature;\nuniform vec2 uCenter;\nuniform float uHeightScale;\n${shader.vertexShader}`.replace(
         '#include <project_vertex>',
         CURVE_VERTEX,
       );

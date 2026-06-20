@@ -60,6 +60,22 @@ body,
   opacity: 0.65;
 }
 
+.control label {
+  display: block;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  opacity: 0.6;
+  margin-bottom: 8px;
+}
+
+.control input[type='range'] {
+  width: 100%;
+  margin: 0;
+  accent-color: var(--amber);
+  cursor: pointer;
+}
+
 .status {
   margin: 12px 0 0;
   font-size: 12px;
