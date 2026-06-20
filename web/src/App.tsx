@@ -15,7 +15,13 @@ const POOL_SIZE = Math.max(
 
 const DEFAULT_SIZE = 0.5; // placeholder until the manifest sets the real finest size
 
-const MANIFEST_URL = `${import.meta.env.BASE_URL}pyramid/manifest.json`;
+// Resolve to an ABSOLUTE url against the document. The voxel worker's own base is
+// /assets/, so a relative `./pyramid/...` would fetch from there (404) — the main
+// thread and worker must agree on the same absolute manifest + tile urls.
+const MANIFEST_URL = new URL(
+  `${import.meta.env.BASE_URL}pyramid/manifest.json`,
+  document.baseURI,
+).href;
 
 export default function App() {
   // The streamed (finest) voxel size, pinned to the finest pyramid level once the
