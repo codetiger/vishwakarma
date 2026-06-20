@@ -114,10 +114,9 @@ interface Props {
   bounds: [number, number, number, number]; // [minX, minZ, maxX, maxZ]
   workers: Worker[];
   inbox: React.MutableRefObject<TileResult[]>;
-  onStats?: (cells: number, voxels: number) => void;
 }
 
-export default function TileField({ voxelSize, focus, bounds, workers, inbox, onStats }: Props) {
+export default function TileField({ voxelSize, focus, bounds, workers, inbox }: Props) {
   const camera = useThree((s) => s.camera);
   const groupRef = useRef<THREE.Group>(null);
   const nodes = useRef(new Map<string, Node>());
@@ -339,7 +338,6 @@ export default function TileField({ voxelSize, focus, bounds, workers, inbox, on
         maxX: (n.ix + 1) * cell,
         maxZ: (n.iz + 1) * cell,
         voxelSize: n.voxel,
-        blendRadius: mapTheme.view.colorBlendRadius,
       } satisfies ToWorker);
     }
 
@@ -410,15 +408,6 @@ export default function TileField({ voxelSize, focus, bounds, workers, inbox, on
         map.delete(key);
       }
     }
-
-    let cells = 0;
-    let voxels = 0;
-    for (const n of map.values()) {
-      if (n.mesh && n.mesh.visible) { cells++; voxels += n.mesh.count; }
-    }
-    // While swapping density, the retired meshes are what's on screen.
-    for (const m of retired.current) { cells++; voxels += m.count; }
-    onStats?.(cells, voxels);
   });
 
   return <group ref={groupRef} />;

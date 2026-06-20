@@ -17,8 +17,6 @@ export type ToWorker =
       maxX: number;
       maxZ: number;
       voxelSize: number;
-      /** Neighbour radius (in voxels) for the per-voxel colour cross-fade. */
-      blendRadius: number;
     };
 
 export type FromWorker =

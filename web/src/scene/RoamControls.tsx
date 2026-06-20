@@ -33,6 +33,13 @@ const ZOOM_SPEED = 0.0012; // wheel delta → zoom factor change
 const ZOOM_MIN = minAltitude / cameraHeight; // fully zoomed in → altitude = minAltitude
 const ZOOM_MAX = maxAltitude / cameraHeight; // fully zoomed out → altitude = maxAltitude
 
+// Forward/right unit vectors for a heading. The render frame mirrors z (north up),
+// which flips handedness, so screen-right is the NEGATED world right.
+const headingBasis = (h: number) => ({
+  forward: new THREE.Vector2(-Math.sin(h), -Math.cos(h)),
+  right: new THREE.Vector2(-Math.cos(h), Math.sin(h)),
+});
+
 interface Props {
   focus: React.MutableRefObject<THREE.Vector3>; // shared LOD/fog center = the eye (world)
   bounds: [number, number, number, number]; // [minX, minZ, maxX, maxZ]
@@ -54,16 +61,6 @@ export default function RoamControls({ focus, bounds }: Props) {
 
   useEffect(() => {
     const el = gl.domElement;
-    const basis = () => {
-      const h = heading.current;
-      return {
-        forward: new THREE.Vector2(-Math.sin(h), -Math.cos(h)),
-        // The render frame mirrors z (north up), which flips handedness, so
-        // screen-right is the NEGATED world right.
-        right: new THREE.Vector2(-Math.cos(h), Math.sin(h)),
-      };
-    };
-
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
       zoom.current = THREE.MathUtils.clamp(
@@ -89,7 +86,7 @@ export default function RoamControls({ focus, bounds }: Props) {
         headingVel.current += dx * ROTATE_SPEED;
         return;
       }
-      const { forward, right } = basis();
+      const { forward, right } = headingBasis(heading.current);
       const k = PAN_SPEED * zoom.current; // pan faster when zoomed out (higher)
       vel.current.x += (-right.x * dx + forward.x * dy) * k;
       vel.current.y += (-right.y * dx + forward.y * dy) * k;
@@ -142,10 +139,7 @@ export default function RoamControls({ focus, bounds }: Props) {
 
   useFrame((_, delta) => {
     const dt = Math.min(delta, 0.05);
-    const h0 = heading.current;
-    const forward = new THREE.Vector2(-Math.sin(h0), -Math.cos(h0));
-    // Negated world right — the render frame mirrors z (see basis()).
-    const right = new THREE.Vector2(-Math.cos(h0), Math.sin(h0));
+    const { forward, right } = headingBasis(heading.current);
 
     const k = keys.current;
     const step = KEY_SPEED * dt * zoom.current;
@@ -193,12 +187,9 @@ export default function RoamControls({ focus, bounds }: Props) {
     // Smooth altitude: damp toward averaged ground + zoomed altitude, never below
     // the nearby max + clearance.
     const g = sampleGround(eye.x, eye.z);
-    const altitude = THREE.MathUtils.clamp(
-      cameraHeight * zoom.current,
-      minAltitude,
-      maxAltitude,
-    );
-    const target = g.avg + altitude;
+    // altitude = cameraHeight × zoom, already bounded to [minAltitude, maxAltitude]
+    // by the wheel clamp ([ZOOM_MIN, ZOOM_MAX]).
+    const target = g.avg + cameraHeight * zoom.current;
     camY.current =
       camY.current == null
         ? target

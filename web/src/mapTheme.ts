@@ -17,6 +17,9 @@ export interface MapTheme {
   lighting: {
     keyColor: string;
     keyIntensity: number;
+    /** Cool fill light from behind, balancing the warm key. */
+    fillColor: string;
+    fillIntensity: number;
     ambient: number;
     hemiSky: string;
     hemiGround: string;
@@ -98,11 +101,6 @@ export interface MapTheme {
     pitch: number;
     /** Guard on how fine the slider may go (per-cell dense-grid budget). */
     maxCellVoxels: number;
-    /** Neighbour radius (in voxels) for the per-voxel colour cross-fade baked in
-     *  at voxelize time. Higher = softer transitions between material bands (snow
-     *  line, shoreline, cliff strata); `0` = hard, exact material colours. Width
-     *  is in voxels, so the world-space fade scales with each LOD level's size. */
-    colorBlendRadius: number;
     /** Eye inset from the map edge (world units), fixed at every zoom so the
      *  framing doesn't jump as you zoom and coastal regions stay reachable.
      *  Small enough to roam right up to the coast; the world rim beyond curves
@@ -122,6 +120,8 @@ export const mapTheme: MapTheme = {
   lighting: {
     keyColor: "#ffe1b0", // low moon-gold key
     keyIntensity: 1.35,
+    fillColor: "#9fc0e8", // cool blue fill from behind
+    fillIntensity: 0.4,
     ambient: 0.4,
     hemiSky: "#cdd6f4", // cool starlight from above
     hemiGround: "#2a2438", // violet ground bounce
@@ -165,7 +165,6 @@ export const mapTheme: MapTheme = {
     maxAltitude: 80, // coarse-overview ceiling → LOD shows the coarsest of its 3 levels
     pitch: 0.95, // ~54° down — Google-Earth-like tilt
     maxCellVoxels: 30_000_000,
-    colorBlendRadius: 2,
     edgeMargin: 30,
   },
 };

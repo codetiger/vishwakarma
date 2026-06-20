@@ -102,9 +102,9 @@ cd web && npm install && npm run dev              # http://localhost:5173
   scatter those constants into the scene modules.
 - **Every ground material must share the curvature shader** (`applyWorldCurvature`
   + the shared `curveUniforms`), or it detaches from the curved terrain.
-- **`colorBlendRadius` / the message's `blendRadius` are plumbed but unused** —
-  `buildCell` currently colours each voxel from the exact hypsometric ramp with no
-  neighbour cross-fade. Wire it through `buildMesh.ts` if you implement the blend.
+- **No per-voxel colour cross-fade.** `buildCell` colours each voxel from the exact
+  hypsometric ramp. If you implement a neighbour blend, thread a `blendRadius`
+  through the worker message (`voxelTypes.ts`) and a theme knob in `mapTheme.ts`.
 - **Generated artifacts are git-ignored:** `web/public/pyramid/` (rebuild with
   `python -m gen_pyramid`), `tools/**/_cache/` (the DEM download), `node_modules`.
 - **Screenshots:** the viewer streams tiles asynchronously, so headless

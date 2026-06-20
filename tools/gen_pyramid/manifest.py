@@ -28,7 +28,6 @@ def build(cfg, stats: dict) -> dict:
         # Merc bbox of the exact region [minX, minY, maxX, maxY]; client maps it to
         # world bounds via (merc - origin) / worldScale.
         "regionMerc": [round(ox, 3), round(oy, 3), round(mx1, 3), round(my1, 3)],
-        "verticalExaggeration": 1.0,
         "heightRange": stats["heightRange"],
         "coverage": stats["coverage"],
         "tileUrl": "tiles/{z}/{x}/{y}" + (".bin.gz" if pyr.gzip else ".bin"),

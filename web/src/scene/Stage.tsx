@@ -14,13 +14,12 @@ interface Props {
   bounds: [number, number, number, number];
   workers: Worker[];
   inbox: React.MutableRefObject<TileResult[]>;
-  onStats?: (tiles: number, voxels: number) => void;
 }
 
 // Owns the <Canvas>. The camera roams just above the terrain; the far plane reaches
 // past the LOD clipmap's outer radius so the distant coarse terrain is visible,
 // curving down (round-world shader) to a clean silhouette against the starfield.
-export default function Stage({ voxelSize, focus, bounds, workers, inbox, onStats }: Props) {
+export default function Stage({ voxelSize, focus, bounds, workers, inbox }: Props) {
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 760;
   const far = mapTheme.view.maxRadius + 60;
   return (
@@ -37,7 +36,7 @@ export default function Stage({ voxelSize, focus, bounds, workers, inbox, onStat
       <Skydome />
       <LightingRig />
       <RoamControls focus={focus} bounds={bounds} />
-      <TileField voxelSize={voxelSize} focus={focus} bounds={bounds} workers={workers} inbox={inbox} onStats={onStats} />
+      <TileField voxelSize={voxelSize} focus={focus} bounds={bounds} workers={workers} inbox={inbox} />
       <PostFx enabled={!isMobile} voxelSize={voxelSize} />
     </Canvas>
   );

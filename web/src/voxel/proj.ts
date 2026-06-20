@@ -16,6 +16,10 @@ export const WORLD_SCALE_XZ = 11131.949079327358; // m per world unit (= 0.1° m
 export const VERTICAL_EXAGGERATION = 1.5; // ×true scale; raise for more dramatic relief
 export const WORLD_SCALE_Y = WORLD_SCALE_XZ / VERTICAL_EXAGGERATION; // m per world height unit
 
+/** merc metres per height sample at zoom z, on an N-sample tile grid. The global
+ *  Web-Mercator grid both the projection and the tile sampler are addressed on. */
+export const mercRes = (z: number, n: number) => (2 * E) / (2 ** z * n);
+
 export interface Manifest {
   version: number;
   projection: string;
@@ -29,7 +33,6 @@ export interface Manifest {
   maxZoom: number;
   originMerc: [number, number];
   regionMerc: [number, number, number, number]; // [mx0,my0,mx1,my1]
-  verticalExaggeration: number;
   heightRange: [number, number];
   coverage: Record<string, { xRange: [number, number]; yRange: [number, number] }>;
   tileUrl: string;
@@ -64,7 +67,7 @@ export function makeProj(m: Manifest): Proj {
     (mx1 - ox) / WORLD_SCALE_XZ,
     (my1 - oy) / WORLD_SCALE_XZ,
   ];
-  const res = (z: number) => (2 * E) / (2 ** z * N);
+  const res = (z: number) => mercRes(z, N);
   return {
     m,
     N,

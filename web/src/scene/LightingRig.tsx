@@ -10,7 +10,7 @@ export default function LightingRig() {
       <hemisphereLight args={[lighting.hemiSky, lighting.hemiGround, lighting.hemiIntensity]} />
       <ambientLight intensity={lighting.ambient} />
       <directionalLight position={[10, 16, 8]} intensity={lighting.keyIntensity} color={lighting.keyColor} />
-      <directionalLight position={[-8, 6, -10]} intensity={0.4} color="#9fc0e8" />
+      <directionalLight position={[-8, 6, -10]} intensity={lighting.fillIntensity} color={lighting.fillColor} />
     </>
   );
 }

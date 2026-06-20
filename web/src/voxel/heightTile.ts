@@ -8,7 +8,7 @@
 // (tileSamples, border, blockSize) and the format version live in the manifest;
 // z/x/y are the URL path. The decoder is handed n/border/blk by the TileStore.
 
-import { E, type Manifest } from './proj';
+import { E, mercRes, type Manifest } from './proj';
 
 export interface Tile {
   data: Int16Array;
@@ -81,7 +81,7 @@ export class TileStore {
   }
 
   private res(z: number) {
-    return (2 * E) / (2 ** z * this.N);
+    return mercRes(z, this.N);
   }
 
   load(z: number, x: number, y: number): Promise<Tile | null> {
