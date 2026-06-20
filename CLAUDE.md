@@ -31,8 +31,13 @@ cd web && npm install && npm run dev              # http://localhost:5173
   region, DEM source, and pyramid knobs.
 - `mercator.py` is the EPSG:3857 tile math; `tiles.py` builds each zoom as a
   `WarpedVRT` aligned to the global tile grid and window-reads each tile;
-  `encode.py` packs the `i16` tile bytes; `manifest.py` writes `manifest.json`.
-- **Tiles are heights only** — `(N+2B)²` `i16` samples + a 20-byte header. Colour,
+  `encode.py` bit-packs the tile bytes; `manifest.py` writes `manifest.json`.
+- **Tiles are heights only** and **headerless** — a tile file is just a `BLK×BLK`
+  (16×16) per-block table + packed payload: `(N+2B)²` height codes where each block
+  carries its own `base` + minimal `bits` width (constant blocks → `bits=0`, no
+  payload). Local per-block ranges pack far tighter than a single per-tile width.
+  All geometry (`tileSamples`, `border`, `blockSize`) + format `version` live in
+  `manifest.json`, not per tile; `z/x/y` are the URL path. Colour,
   AO, culling, and the LOD skirt are all derived in the browser, so the format
   stays tiny and resolution-independent. `verify.py` (`--self-test`) checks the
   pipeline on a synthetic DEM with no network.

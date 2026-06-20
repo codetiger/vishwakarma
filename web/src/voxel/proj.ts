@@ -5,17 +5,23 @@
 // World units: mercator metres are huge, so we divide by a scale. Horizontally
 // 1 unit = 0.1° of mercator-x (≈ 11.1 km), which puts the India region at
 // ~380×420 units — the numeric range mapTheme + RoamControls are already tuned
-// for. Vertically we exaggerate (÷300 m) so mountains actually read as relief.
+// for. Vertically we use the SAME metres-per-unit as horizontal so terrain is
+// true-to-scale, divided by a small VERTICAL_EXAGGERATION so relief still reads
+// without the cartoon spikes the old ÷200 m (≈56× exaggeration) produced.
+// (Mercator overstates horizontal ground distance by ~1/cos(lat), so the
+// effective ground exaggeration is a few % above this factor — fine, it's taste.)
 
 export const E = 20037508.342789244; // web-mercator half-extent (m)
 export const WORLD_SCALE_XZ = 11131.949079327358; // m per world unit (= 0.1° merc-x)
-export const WORLD_SCALE_Y = 200; // m per world height unit (vertical exaggeration)
+export const VERTICAL_EXAGGERATION = 1.5; // ×true scale; raise for more dramatic relief
+export const WORLD_SCALE_Y = WORLD_SCALE_XZ / VERTICAL_EXAGGERATION; // m per world height unit
 
 export interface Manifest {
   version: number;
   projection: string;
   tileSamples: number;
   border: number;
+  blockSize: number;
   heightScale: number;
   heightOffset: number;
   nodata: number;

@@ -3,30 +3,60 @@
 // main thread). Samples are addressed on the GLOBAL Web-Mercator grid and read
 // from each sample's home tile, so bilinear interpolation across tile boundaries
 // fetches whatever neighbour tiles it needs (the stored border is unused here).
+//
+// Tiles are HEADERLESS: the file is just the per-block table + payload. Geometry
+// (tileSamples, border, blockSize) and the format version live in the manifest;
+// z/x/y are the URL path. The decoder is handed n/border/blk by the TileStore.
 
 import { E, type Manifest } from './proj';
 
 export interface Tile {
-  z: number;
-  x: number;
-  y: number;
-  n: number;
-  border: number;
   data: Int16Array;
 }
 
-const MAGIC = 0x564b4831; // "VKH1" big-endian
+export const MANIFEST_VERSION = 2; // headerless tiles; checked once per pyramid load
+const BLOCK_ENTRY = 3; // per-block table entry: i16 base + u8 bits
 
-export function decodeTile(buf: ArrayBuffer): Tile {
+// Decode a headerless per-block bit-packed height tile (mirrors encode.py). The
+// tile is a grid of blk×blk blocks, each with its own base + `bits` width; samples
+// are value = code − base, LSB-first, row-major within the block, byte-aligned per
+// block (bits=0 ⇒ constant block, no payload). Decodes into one flat Int16Array.
+export function decodeTile(buf: ArrayBuffer, n: number, border: number, blk: number): Tile {
   const dv = new DataView(buf);
-  if (dv.getUint32(0, false) !== MAGIC) throw new Error('bad tile magic');
-  const z = dv.getUint8(5);
-  const x = dv.getUint32(8, true);
-  const y = dv.getUint32(12, true);
-  const n = dv.getUint16(16, true);
-  const border = dv.getUint16(18, true);
   const side = n + 2 * border;
-  return { z, x, y, n, border, data: new Int16Array(buf, 20, side * side) };
+  const nb = Math.ceil(side / blk);
+  const data = new Int16Array(side * side);
+  const bytes = new Uint8Array(buf);
+  let tableOff = 0;
+  let payOff = BLOCK_ENTRY * nb * nb;
+
+  for (let r0 = 0; r0 < side; r0 += blk) {
+    const r1 = Math.min(r0 + blk, side);
+    for (let c0 = 0; c0 < side; c0 += blk) {
+      const c1 = Math.min(c0 + blk, side);
+      const base = dv.getInt16(tableOff, true);
+      const bits = dv.getUint8(tableOff + 2);
+      tableOff += BLOCK_ENTRY;
+      if (bits === 0) {
+        for (let r = r0; r < r1; r++) data.fill(base, r * side + c0, r * side + c1);
+      } else {
+        const mask = (1 << bits) - 1; // bits ≤ 16 → a value spans ≤ 3 bytes
+        let bitpos = 0; // bit offset within this block's payload
+        for (let r = r0; r < r1; r++) {
+          let o = r * side + c0;
+          for (let c = c0; c < c1; c++) {
+            const bp = payOff + (bitpos >> 3);
+            const chunk =
+              bytes[bp] | ((bytes[bp + 1] ?? 0) << 8) | ((bytes[bp + 2] ?? 0) << 16);
+            data[o++] = base + ((chunk >>> (bitpos & 7)) & mask);
+            bitpos += bits;
+          }
+        }
+        payOff += (bitpos + 7) >> 3; // advance past this block (byte-aligned)
+      }
+    }
+  }
+  return { data };
 }
 
 type Slot = Tile | null | Promise<Tile | null>;
@@ -34,11 +64,18 @@ type Slot = Tile | null | Promise<Tile | null>;
 export class TileStore {
   private cache = new Map<string, Slot>();
   private N: number;
+  private B: number;
+  private BLK: number;
   private scale: number;
   private offset: number;
 
   constructor(m: Manifest, private urlFor: (z: number, x: number, y: number) => string) {
+    if (m.version !== MANIFEST_VERSION) {
+      throw new Error(`manifest version ${m.version}, expected ${MANIFEST_VERSION}`);
+    }
     this.N = m.tileSamples;
+    this.B = m.border;
+    this.BLK = m.blockSize;
     this.scale = m.heightScale;
     this.offset = m.heightOffset;
   }
@@ -53,7 +90,7 @@ export class TileStore {
     if (e !== undefined) return Promise.resolve(e instanceof Promise ? e : e);
     const p = fetch(this.urlFor(z, x, y))
       .then(async (r) => {
-        const t = r.ok ? decodeTile(await r.arrayBuffer()) : null;
+        const t = r.ok ? decodeTile(await r.arrayBuffer(), this.N, this.B, this.BLK) : null;
         this.cache.set(key, t);
         return t;
       })
@@ -96,9 +133,9 @@ export class TileStore {
     const ty = Math.floor(row / N);
     const t = this.cache.get(`${z}/${tx}/${ty}`);
     if (!t || t instanceof Promise) return 0;
-    const side = N + 2 * t.border;
-    const lc = col - tx * N + t.border;
-    const lr = row - ty * N + t.border;
+    const side = N + 2 * this.B;
+    const lc = col - tx * N + this.B;
+    const lr = row - ty * N + this.B;
     return t.data[lr * side + lc] * this.scale + this.offset;
   }
 

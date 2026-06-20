@@ -19,9 +19,9 @@ target_arcsec = 15         # resample the 15″ mosaic to this (native ≈ 463 m
 [pyramid]
 # Web-Mercator height-tile pyramid (z=0 coarsest, sparse, written to web/public/pyramid/).
 min_zoom = 1          # coarse base — far field is a handful of big cells
-max_zoom = 9          # res(9) ≈ 305 m/sample — captures the DEM-native 15″ (≈463 m) detail
+max_zoom = 8          # res(8) ≈ 611 m/sample — z9 (305 m) oversamples the 463 m source, so drop it
 tile_samples = 256    # N: interior height samples per tile edge
 border = 2            # B: overlap ring (>= AO radius) so tiles self-seam
-height_scale = 1.0    # metres per i16 code (±32767 m covers Earth)
+height_scale = 4.0    # 4 m vertical step; per-block (16×16) bit-packing keeps it cheap (sub-voxel at z8)
 height_offset = 0.0
 gzip = false          # write raw .bin for the POC; gzip at the serve/CDN layer

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from . import mercator
+from . import encode, mercator
 
 
 def build(cfg, stats: dict) -> dict:
@@ -14,10 +14,11 @@ def build(cfg, stats: dict) -> dict:
     ox, oy = mercator.lonlat_to_merc(cfg.region.min_lon, cfg.region.min_lat)
     mx1, my1 = mercator.lonlat_to_merc(cfg.region.max_lon, cfg.region.max_lat)
     return {
-        "version": 1,
+        "version": 2,  # 2 = headerless tiles (geometry/version live here, not per tile)
         "projection": "webmercator",
         "tileSamples": pyr.tile_samples,
         "border": pyr.border,
+        "blockSize": encode.BLK,
         "heightScale": pyr.height_scale,
         "heightOffset": pyr.height_offset,
         "nodata": -32768,

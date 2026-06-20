@@ -43,7 +43,8 @@ def _synth_dem(path: Path, bbox, size=512):
 
 def _load(cfg, z, x, y):
     f = cfg.paths.pyramid_out / "tiles" / str(z) / str(x) / f"{y}.bin"
-    _, arr = encode.decode_tile(f.read_bytes())
+    pyr = cfg.pyramid
+    _, arr = encode.decode_tile(f.read_bytes(), pyr.tile_samples, pyr.border, encode.BLK)
     return arr  # codes == metres (scale=1, offset=0)
 
 

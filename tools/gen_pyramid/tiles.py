@@ -63,7 +63,7 @@ def build(cfg, src_path: Path) -> dict:
                         gmin = min(gmin, float(data.min()))
                         gmax = max(gmax, float(data.max()))
                         blob = encode.encode_tile(
-                            z, x, y, data, n, b,
+                            data, n, b,
                             pyr.height_scale, pyr.height_offset, gzip=pyr.gzip,
                         )
                         tdir = out_root / "tiles" / str(z) / str(x)
