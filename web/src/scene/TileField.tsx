@@ -3,7 +3,9 @@ import { useFrame, useThree } from '@react-three/fiber';
 import * as THREE from 'three';
 import { mapTheme } from '../mapTheme';
 import { applyWorldCurvature } from './curvature';
-import { terrainHeight } from '../terrain';
+import { GLOBE_R, flatToECEF, visibleCapBounds, type CapBounds } from './globe';
+import { cameraControls } from './cameraControls';
+import type { PaletteId } from '../voxel/buildMesh';
 import type { FromWorker, ToWorker, TileResult } from '../voxelTypes';
 
 // Quadtree LOD. The view is a quadtree of square cells centred on the camera:
@@ -40,11 +42,10 @@ const WORKER_DEPTH = 2; // outstanding tiles per pool worker (1 running + 1 queu
 // count stays ~constant at every altitude — the cells just get physically finer as
 // you descend. This sidesteps the ~55× vertical exaggeration that makes a pure
 // screen-space-error metric unable to ever reach the fine levels.
-const BACK_MARGIN = 40; // world units behind the camera kept before culling
-// Cover terrain to ~this many round-world horizon distances. The horizon (where the
-// curvature bends terrain a camera-height below the eye) is ≈ sqrt(altY / curvature);
-// covering a bit past it fills the silhouette without a hard cull edge in the sky.
-const HORIZON_K = 2.5;
+const BACK_MARGIN = 40; // world units behind the focus kept before culling
+// Render slightly past the spherical horizon so the silhouette fills without a hard
+// cull edge in the sky (used both for the per-cell cull and the root-scan cap).
+const HORIZON_MARGIN = 0.06; // radians rendered past the horizon (limb terrain)
 
 interface Node {
   level: number;
@@ -62,11 +63,11 @@ interface Node {
 function buildMesh(msg: TileMsg, material: THREE.Material): THREE.InstancedMesh {
   const { count, positions, colors, yScales, voxelSize } = msg;
   const mesh = new THREE.InstancedMesh(UNIT, material, Math.max(count, 1));
-  // Frustum culling OFF: the round-world curvature (mapTheme.curvature) bends
-  // far tiles DOWN in the vertex shader, but three's CPU cull tests the
-  // undisplaced bounding sphere — so the very tiles that form the curved horizon
-  // (flat position above the frustum top, curved position dipping into view)
-  // would be wrongly culled and pop. The quadtree already bounds the drawn set.
+  // Frustum culling OFF: the sphere projection (curvature.ts) moves vertices from
+  // their flat position onto the globe in the vertex shader, but three's CPU cull
+  // tests the undisplaced (flat) bounding sphere — so tiles whose flat position is
+  // off-frustum but whose projected position is in view (the curved limb) would be
+  // wrongly culled and pop. The quadtree already bounds the drawn set.
   mesh.frustumCulled = false;
   const m = mesh.instanceMatrix.array as Float32Array;
   for (let i = 0; i < count; i++) {
@@ -110,35 +111,40 @@ function buildMesh(msg: TileMsg, material: THREE.Material): THREE.InstancedMesh 
 
 interface Props {
   voxelSize: number; // finest (selected) size
+  palette: PaletteId; // hypsometric colour ramp (changing it re-voxelizes)
   focus: React.MutableRefObject<THREE.Vector3>; // shared LOD center = the eye (world)
   bounds: [number, number, number, number]; // [minX, minZ, maxX, maxZ]
   workers: Worker[];
   inbox: React.MutableRefObject<TileResult[]>;
 }
 
-export default function TileField({ voxelSize, focus, bounds, workers, inbox }: Props) {
+export default function TileField({ voxelSize, palette, focus, bounds, workers, inbox }: Props) {
   const camera = useThree((s) => s.camera);
   const groupRef = useRef<THREE.Group>(null);
   const nodes = useRef(new Map<string, Node>());
   const inflight = useRef<number[]>([]); // outstanding tiles per pool worker
   const reqId = useRef(0);
   const lastS = useRef(0);
-  const fwd = useRef(new THREE.Vector3());
+  const lastPalette = useRef(palette);
+  const cullDir = useRef(new THREE.Vector3()); // scratch: cell sphere direction
+  const viewFwd = useRef(new THREE.Vector3()); // scratch: camera forward (ECEF)
+  const capB = useRef<CapBounds>({ xC: 0, xHalf: 0, zMin: 0, zMax: 0 }); // scratch: visible cap bbox
   // Previous-density meshes held on screen during a density change, until the new
   // grid fully covers the view and we swap atomically (no drop to the coarse base).
   const retired = useRef<THREE.InstancedMesh[]>([]);
 
   const material = useMemo(() => {
     const mat = new THREE.MeshStandardMaterial({ roughness: 0.95, metalness: 0.0, flatShading: true });
-    applyWorldCurvature(mat, mapTheme.curvature);
+    applyWorldCurvature(mat);
     return mat;
   }, []);
 
   useFrame(() => {
     const group = groupRef.current;
     if (!group) return;
-    const { baseVoxel, cellCols, maxRadius, lodLevels, lodBandCells, minAltitude, pitch, lodBias } = mapTheme.view;
+    const { baseVoxel, cellCols, lodLevels, lodBandCells, minAltitude, lodBias } = mapTheme.view;
     const [wMinX, wMinZ, wMaxX, wMaxZ] = bounds;
+    const spanX = wMaxX - wMinX; // map longitude span (wraps); = MAP_SPAN for a global pyramid
     const s = voxelSize;
     const ex = focus.current.x;
     const ez = focus.current.z;
@@ -147,13 +153,14 @@ export default function TileField({ voxelSize, focus, bounds, workers, inbox }: 
       inflight.current = new Array(workers.length).fill(0);
     }
 
-    // Slider changed ⇒ the cell grid (cell = cellCols·voxel) moved, so the old
-    // nodes don't map onto the new grid and must be rebuilt. Instead of wiping the
-    // screen, RETIRE the currently-visible meshes: keep them rendered as a frozen
-    // fallback while the new-density grid streams in behind them (hidden), then
-    // swap atomically once it covers the view (below). So changing density keeps
-    // the current detail up and improves from there — never a coarse flash.
-    if (s !== lastS.current) {
+    // Voxel size OR palette changed ⇒ every cell must be rebuilt: a size change
+    // moves the cell grid (cell = cellCols·voxel) so the old nodes don't map onto
+    // the new grid; a palette change re-colours every voxel at build time. Either
+    // way, instead of wiping the screen, RETIRE the currently-visible meshes: keep
+    // them rendered as a frozen fallback while the new grid streams in behind them
+    // (hidden), then swap atomically once it covers the view (below) — never a
+    // coarse flash, and never the old colours flickering against the new.
+    if (s !== lastS.current || palette !== lastPalette.current) {
       const midSwap = retired.current.length > 0; // a previous change is still streaming
       for (const n of map.values()) {
         if (!n.mesh) continue;
@@ -171,6 +178,7 @@ export default function TileField({ voxelSize, focus, bounds, workers, inbox }: 
       inflight.current.fill(0);
       inbox.current.length = 0;
       lastS.current = s;
+      lastPalette.current = palette;
     }
 
     const C0 = cellCols * s; // level-0 cell world size
@@ -194,6 +202,7 @@ export default function TileField({ voxelSize, focus, bounds, workers, inbox }: 
         if (!n) continue; // evicted
         n.requested = false;
         if (n.voxel !== msg.voxelSize) continue; // stale density
+        if (msg.palette !== palette) continue; // stale palette (size unchanged)
         if (n.mesh) { group.remove(n.mesh); n.mesh.dispose(); }
         n.mesh = buildMesh(msg, material);
         n.mesh.visible = false; // visibility decided below
@@ -202,25 +211,34 @@ export default function TileField({ voxelSize, focus, bounds, workers, inbox }: 
       inbox.current.length = 0;
     }
 
-    // Camera forward in the (z-negated) display plane, for the behind-camera cull.
-    camera.getWorldDirection(fwd.current);
-    const flen = Math.hypot(fwd.current.x, fwd.current.z) || 1;
-    const fwx = fwd.current.x / flen;
-    const fwz = fwd.current.z / flen;
-    // Altitude above the ground beneath the eye (scene Y units). This DRIVES the LOD:
-    // L0 = the finest level shown anywhere. Descend → L0 drops → the whole visible
-    // field sharpens uniformly. minAltitude calibrates L0=0 (finest) at the lowest the
-    // camera flies; cap at lodLevels-3 so L0, L0+1, L0+2 all stay ≤ Lmax.
-    // lodBias shifts the curve finer by N octaves so detail engages EARLIER (at higher
-    // altitude) — finest is then reached ~lodBias octaves of zoom sooner.
-    const altY = Math.max(camera.position.y - terrainHeight(ex, ez), 0.001);
+    // Visibility on the globe is a SPHERICAL-HORIZON test against the ECEF eye: a
+    // cell is visible iff its sphere direction lies inside the camera's visible cap
+    // (dot(dirCell, dirEye) ≥ R/|eye|), plus an ECEF behind-camera cull. (The old
+    // flat behind-plane / flat-distance culls wrongly removed the near southern
+    // hemisphere on the globe.)
+    const eye = camera.position;
+    const de = eye.length() || 1;
+    const dex = eye.x / de;
+    const dey = eye.y / de;
+    const dez = eye.z / de;
+    // Camera's visible spherical cap: points within capAngle of the eye direction
+    // are over the horizon. A cell is only culled if it lies ENTIRELY beyond the
+    // cap — its own angular half-size is added to the threshold, so a big coarse
+    // cell straddling the horizon still recurses to its (smaller) children instead
+    // of pruning the visible part of the subtree.
+    const capAngle = Math.acos(THREE.MathUtils.clamp(GLOBE_R / de, -1, 1));
+    camera.getWorldDirection(viewFwd.current);
+    // Altitude above the globe surface beneath the focus (published by RoamControls).
+    // This DRIVES the LOD: L0 = the finest level shown anywhere. Descend → L0 drops →
+    // the whole visible field sharpens uniformly. minAltitude calibrates L0=0 (finest)
+    // at the lowest the camera flies; cap at lodLevels-3 so L0, L0+1, L0+2 all stay ≤
+    // Lmax. lodBias shifts the curve finer by N octaves so detail engages EARLIER.
+    const altY = Math.max(cameraControls.surfaceAltitude, 0.001);
     const L0 = THREE.MathUtils.clamp(Math.round(Math.log2(altY / minAltitude)) - lodBias, 0, lodLevels - 3);
-    // Reference point R = the ground point at SCREEN-CENTRE. In the (vertically
-    // exaggerated) scene the centre ray hits the ground altY/tan(pitch) ahead — raw
-    // scene units — so the detail lands out in front where you look, not under the eye.
-    const lookDist = Math.min(altY / Math.tan(pitch), maxRadius);
-    const rx = ex + fwx * lookDist;
-    const rz = ez - fwz * lookDist;
+    // Reference point R = the focus itself (the geographic point at screen centre —
+    // the camera looks straight at it), so detail is densest where you look.
+    const rx = ex;
+    const rz = ez;
     // Fat fine disk: render at L0 within band0 of R, then coarsen with distance. band0
     // scales by a CONTINUOUS altitude-proportional cell size (cellCont ≈ cellAt(L0) but
     // without the discrete round()), so the disk and the coverage glide with zoom/pan
@@ -233,21 +251,24 @@ export default function TileField({ voxelSize, focus, bounds, workers, inbox }: 
     const contLevel = THREE.MathUtils.clamp(Math.log2(altY / minAltitude) - lodBias, 0, lodLevels - 3);
     const cellCont = C0 * 2 ** contLevel;
     const band0 = lodBandCells * cellCont;
-    // Render out to (just past) the round-world horizon so the far terrain curves down
-    // to a clean edge against the starfield; bounded by maxRadius. Falls back to the
-    // full region radius if curvature is disabled.
-    const coverRadius = Math.min(maxRadius, HORIZON_K * Math.sqrt(altY / Math.max(mapTheme.curvature, 1e-6)));
+    // Cover the actual visible spherical cap, as a flat-Mercator bbox centred on the
+    // eye's nadir. A single isotropic flat radius under-covers near the poles (Mercator
+    // stretches latitude → holes); visibleCapBounds converts the latitude band through
+    // the stretch so coverage is correct at every latitude. capAngle is the horizon
+    // half-angle; HORIZON_MARGIN renders a little past the limb.
+    visibleCapBounds(eye, Math.min(Math.PI, capAngle + HORIZON_MARGIN), capB.current);
 
     // Walk the quadtree from the roots covering the view; mark visited + split,
     // and collect any cell that needs voxelizing.
     const req: { key: string; level: number; d: number }[] = [];
     const visit = (L: number, ix: number, iz: number) => {
       const cell = cellAt(L);
-      const minX = ix * cell;
       const minZ = iz * cell;
-      const maxX = minX + cell;
       const maxZ = minZ + cell;
-      const offMap = maxX <= wMinX || minX >= wMaxX || maxZ <= wMinZ || minZ >= wMaxZ;
+      // Only LATITUDE (Z) bounds the map — longitude (X) wraps at the antimeridian
+      // (the sampler + shader wrap), so X-out-of-range cells render the far side
+      // instead of leaving a seam. Z-out-of-range is the polar gap (capped meshes).
+      const offMap = maxZ <= wMinZ || minZ >= wMaxZ;
       const key = `${L}_${ix}_${iz}`;
       let n = map.get(key);
       if (!n) {
@@ -267,12 +288,22 @@ export default function TileField({ voxelSize, focus, bounds, workers, inbox }: 
       }
       const cx = (ix + 0.5) * cell;
       const cz = (iz + 0.5) * cell;
-      // Cull when the whole cell is behind the camera, OR beyond the 3-band reach
-      // (distance from R, using the cell's own size as margin so a big root straddling
-      // the bands isn't dropped). Culled cells draw nothing — the haze covers them.
       const dh = Math.hypot(cx - rx, cz - rz);
-      const behind = (cx - ex) * fwx + (ez - cz) * fwz < -(BACK_MARGIN + cell);
-      n.culled = behind || dh - cell >= coverRadius;
+      // Cull the far hemisphere (entirely beyond the spherical horizon) and cells
+      // wholly behind the camera. Culled cells draw nothing; the starfield shows
+      // through. Both tests carry the cell's own size as margin so a big cell that
+      // straddles the boundary isn't dropped (its children get the finer test).
+      flatToECEF(cx, cz, 0, cullDir.current).normalize();
+      const facing = cullDir.current.x * dex + cullDir.current.y * dey + cullDir.current.z * dez;
+      const cellHalfAngle = (cell * 0.72) / GLOBE_R; // ~half-diagonal arc of the cell
+      const horizonThresh = Math.cos(Math.min(Math.PI, capAngle + HORIZON_MARGIN + cellHalfAngle));
+      const px = cullDir.current.x * GLOBE_R - eye.x;
+      const py = cullDir.current.y * GLOBE_R - eye.y;
+      const pz = cullDir.current.z * GLOBE_R - eye.z;
+      const behind =
+        px * viewFwd.current.x + py * viewFwd.current.y + pz * viewFwd.current.z <
+        -(BACK_MARGIN + cell);
+      n.culled = facing < horizonThresh || behind;
       if (n.culled) {
         n.shouldSplit = false;
         return;
@@ -292,20 +323,24 @@ export default function TileField({ voxelSize, focus, bounds, workers, inbox }: 
       }
     };
 
-    // Scan the coarse roots covering the visible region around R (out to the horizon):
-    // zoomed in coverRadius is small so this is a handful of roots; zoomed out it grows
-    // to the region. The per-cell cull above prunes anything beyond coverRadius.
+    // Scan the coarse roots over the visible cap. X is centred on the FOCUS (so cells
+    // across the antimeridian from it get seam-correct, focus-relative LOD) and widened
+    // to also reach the cap centre; clamped to one longitude period so each geographic
+    // cell is scanned once (no double-draw). Z uses the cap's absolute Mercator-correct
+    // latitude band, which extends far enough north/south near the poles to avoid holes.
+    // The per-cell ECEF horizon cull prunes the far side. Root cells are large by design
+    // (cellCols·baseVoxel + GLOBE_EXTRA_LEVELS), so even a whole hemisphere is few roots.
     const rootCell = cellAt(Lmax);
-    const scanR = coverRadius + rootCell;
-    const i0 = Math.floor((rx - scanR) / rootCell);
-    const i1 = Math.floor((rx + scanR) / rootCell);
-    const k0 = Math.floor((rz - scanR) / rootCell);
-    const k1 = Math.floor((rz + scanR) / rootCell);
+    let dxToCap = capB.current.xC - rx; // shortest wrapped flat-x from focus to cap centre
+    dxToCap = ((dxToCap + spanX / 2) % spanX + spanX) % spanX - spanX / 2;
+    const xHalfW = Math.min(spanX / 2, capB.current.xHalf + Math.abs(dxToCap));
+    const i0 = Math.floor((rx - xHalfW - rootCell) / rootCell);
+    const i1 = Math.floor((rx + xHalfW + rootCell) / rootCell);
+    const k0 = Math.floor((capB.current.zMin - rootCell) / rootCell);
+    const k1 = Math.floor((capB.current.zMax + rootCell) / rootCell);
     const roots: string[] = [];
     for (let ix = i0; ix <= i1; ix++) {
       for (let iz = k0; iz <= k1; iz++) {
-        const d = Math.hypot((ix + 0.5) * rootCell - rx, (iz + 0.5) * rootCell - rz);
-        if (d - rootCell > coverRadius) continue;
         visit(Lmax, ix, iz);
         if (map.get(`${Lmax}_${ix}_${iz}`)?.visited) roots.push(`${Lmax}_${ix}_${iz}`);
       }
@@ -338,6 +373,7 @@ export default function TileField({ voxelSize, focus, bounds, workers, inbox }: 
         maxX: (n.ix + 1) * cell,
         maxZ: (n.iz + 1) * cell,
         voxelSize: n.voxel,
+        palette,
       } satisfies ToWorker);
     }
 

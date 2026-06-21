@@ -48,7 +48,7 @@ body,
 
 .panel h1 {
   margin: 0;
-  padding-right: 28px;
+  padding-right: 58px;
   font-size: 18px;
   font-weight: 600;
   letter-spacing: 0.02em;
@@ -59,6 +59,10 @@ body,
   font-size: 12px;
   line-height: 1.4;
   opacity: 0.65;
+}
+
+.control + .control {
+  margin-top: 16px;
 }
 
 .control label {
@@ -77,18 +81,163 @@ body,
   cursor: pointer;
 }
 
-.panel .repo {
+/* Custom palette dropdown: native <option> can't render gradient swatches across
+   browsers, so this is a button + listbox that previews each ramp. */
+.palette-select {
+  position: relative;
+}
+
+.palette-trigger,
+.palette-opt {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 7px 10px;
+  background: none;
+  border: none;
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.palette-trigger {
+  border-radius: 8px;
+  background: rgba(10, 14, 26, 0.6);
+  border: 1px solid rgba(227, 162, 92, 0.3);
+  transition: border-color 0.15s ease;
+}
+
+.palette-trigger:hover,
+.palette-trigger:focus,
+.palette-select [aria-expanded='true'].palette-trigger {
+  border-color: rgba(227, 162, 92, 0.6);
+  outline: none;
+}
+
+.swatch {
+  flex: none;
+  width: 64px;
+  height: 16px;
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+}
+
+.palette-name {
+  flex: 1;
+}
+
+/* Down chevron drawn in CSS (no extra asset). */
+.chev {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-right: 1.5px solid var(--amber);
+  border-bottom: 1.5px solid var(--amber);
+  transform: translateY(-2px) rotate(45deg);
+  opacity: 0.8;
+}
+
+.palette-list {
   position: absolute;
-  top: 16px;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  z-index: 20;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  border-radius: 10px;
+  background: var(--panel);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(227, 162, 92, 0.25);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+}
+
+.palette-opt {
+  border-radius: 7px;
+}
+
+.palette-opt:hover {
+  background: rgba(227, 162, 92, 0.12);
+}
+
+.palette-opt.is-active {
+  background: rgba(227, 162, 92, 0.2);
+}
+
+.panel .credit {
+  margin: 10px 0 0;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  opacity: 0.7;
+}
+
+.panel .credit a {
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.panel .credit a:hover {
+  opacity: 1;
+}
+
+/* Top-right corner: info button (attribution popover) + GitHub link. */
+.panel-actions {
+  position: absolute;
+  top: 14px;
   right: 16px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.panel .repo,
+.panel .info-btn {
   display: inline-flex;
+  padding: 0;
+  background: none;
+  border: none;
   color: var(--amber);
   opacity: 0.75;
+  cursor: pointer;
   transition: opacity 0.15s ease;
 }
 
-.panel .repo:hover {
+.panel .repo:hover,
+.panel .info-btn:hover,
+.panel .info-btn[aria-expanded='true'] {
   opacity: 1;
+}
+
+.info-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.info-popover {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  width: 220px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: var(--panel);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(227, 162, 92, 0.25);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+  z-index: 20;
+}
+
+.info-popover .info-title {
+  margin: 0;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  opacity: 0.55;
 }
 
 .status {
@@ -100,4 +249,89 @@ body,
 .status.err {
   color: #ff9a8a;
   opacity: 1;
+}
+
+/* On-screen navigation: compass + zoom, bottom-right. The container ignores
+   pointer events so canvas drag still works in the gaps; the buttons re-enable
+   them, so a click lands on the button (not the canvas) and never starts a pan. */
+.view-controls {
+  position: absolute;
+  right: 20px;
+  bottom: 20px;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  pointer-events: none;
+  user-select: none;
+}
+
+.zoom-stack,
+.compass {
+  pointer-events: auto;
+  background: var(--panel);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(227, 162, 92, 0.25);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+}
+
+.zoom-stack {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-radius: 12px;
+}
+
+.ctl-btn {
+  width: 42px;
+  height: 42px;
+  background: transparent;
+  border: none;
+  color: var(--amber);
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.8;
+  transition: opacity 0.15s ease, background 0.15s ease;
+}
+
+.ctl-btn:hover {
+  opacity: 1;
+  background: rgba(227, 162, 92, 0.12);
+}
+
+.ctl-btn + .ctl-btn {
+  border-top: 1px solid rgba(227, 162, 92, 0.2);
+}
+
+.compass {
+  width: 46px;
+  height: 46px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  cursor: pointer;
+  opacity: 0.85;
+  transition: opacity 0.15s ease;
+}
+
+.compass:hover {
+  opacity: 1;
+}
+
+.compass .compass-ring {
+  fill: none;
+  stroke: rgba(227, 162, 92, 0.25);
+  stroke-width: 1;
+}
+
+.compass .needle-n {
+  fill: var(--amber);
+}
+
+.compass .needle-s {
+  fill: var(--ink);
+  opacity: 0.35;
 }

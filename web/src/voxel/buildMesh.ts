@@ -22,30 +22,79 @@ export interface MeshBuffers {
   count: number;
 }
 
-// Elevation (m) → sRGB. Sea is blue; land greens→tan→brown→grey→snow.
-const STOPS: [number, number, number, number][] = [
-  [-6000, 10, 24, 58],
-  [-200, 26, 64, 110],
-  [-1, 44, 96, 150],
-  [0, 66, 106, 84],
-  [200, 96, 130, 74],
-  [700, 150, 150, 92],
-  [1800, 148, 120, 84],
-  [3200, 122, 112, 106],
-  [4600, 182, 184, 190],
-  [6500, 255, 255, 255],
-];
+// Elevation (m) → sRGB hypsometric ramps. Each palette is a list of stops
+// `[elevationM, r, g, b]` ascending by elevation; `ramp` lerps between them (sea
+// below 0 m, land above). To add a palette: add a stop list here AND its id to
+// `PaletteId` and the App dropdown. Colour lives in the voxelizer — not in the
+// tile, not in mapTheme.
+export type PaletteId = 'atlas' | 'terrain' | 'grayscale' | 'viridis' | 'inferno';
 
-function ramp(m: number): number {
-  let lo = STOPS[0];
-  let hi = STOPS[STOPS.length - 1];
+type Stops = [number, number, number, number][];
+
+export const PALETTES: Record<PaletteId, Stops> = {
+  // Classic atlas tints: blue sea → green lowland → tan → brown → grey → snow.
+  atlas: [
+    [-6000, 10, 24, 58],
+    [-200, 26, 64, 110],
+    [-1, 44, 96, 150],
+    [0, 66, 106, 84],
+    [200, 96, 130, 74],
+    [700, 150, 150, 92],
+    [1800, 148, 120, 84],
+    [3200, 122, 112, 106],
+    [4600, 182, 184, 190],
+    [6500, 255, 255, 255],
+  ],
+  // matplotlib `terrain`: deep blue → cyan ocean → green shore → pale yellow →
+  // brown → white peaks.
+  terrain: [
+    [-6000, 48, 48, 140],
+    [-2400, 0, 153, 255],
+    [-1, 64, 196, 222],
+    [0, 0, 168, 96],
+    [1600, 230, 230, 150],
+    [3600, 150, 112, 84],
+    [5200, 224, 214, 208],
+    [6500, 255, 255, 255],
+  ],
+  // Raw DEM heightmap: dark (low) → light (high), neutral grey.
+  grayscale: [
+    [-6000, 6, 6, 9],
+    [-1, 40, 40, 44],
+    [0, 64, 64, 66],
+    [3000, 150, 150, 152],
+    [6500, 248, 248, 248],
+  ],
+  // Viridis (perceptually uniform): purple → blue → teal → green → yellow.
+  viridis: [
+    [-6000, 68, 1, 84],
+    [-2000, 59, 82, 139],
+    [1000, 33, 145, 140],
+    [3800, 94, 201, 98],
+    [6500, 253, 231, 37],
+  ],
+  // Inferno (perceptually uniform, warm): black → purple → red → orange → cream.
+  inferno: [
+    [-6000, 0, 0, 4],
+    [-2000, 87, 16, 110],
+    [1000, 188, 55, 84],
+    [3800, 249, 142, 8],
+    [6500, 252, 255, 164],
+  ],
+};
+
+export const DEFAULT_PALETTE: PaletteId = 'atlas';
+
+function ramp(m: number, stops: Stops): number {
+  let lo = stops[0];
+  let hi = stops[stops.length - 1];
   if (m <= lo[0]) hi = lo;
   else if (m >= hi[0]) lo = hi;
   else
-    for (let i = 1; i < STOPS.length; i++)
-      if (m <= STOPS[i][0]) {
-        lo = STOPS[i - 1];
-        hi = STOPS[i];
+    for (let i = 1; i < stops.length; i++)
+      if (m <= stops[i][0]) {
+        lo = stops[i - 1];
+        hi = stops[i];
         break;
       }
   const t = hi[0] === lo[0] ? 0 : (m - lo[0]) / (hi[0] - lo[0]);
@@ -75,12 +124,14 @@ export function buildCell(
   voxelSize: number,
   minX: number,
   minZ: number,
+  palette: PaletteId,
 ): MeshBuffers {
   const count = cellCols * cellCols;
   const positions = new Float32Array(count * 3);
   const colors = new Uint32Array(count);
   const yScales = new Float32Array(count);
   const invY = 1 / WORLD_SCALE_Y;
+  const stops = PALETTES[palette] ?? PALETTES[DEFAULT_PALETTE];
 
   // World-Y height for the whole padded grid (reused by walls, skirt, and AO).
   const H = new Float32Array(side * side);
@@ -125,7 +176,7 @@ export function buildCell(
       positions[k * 3 + 1] = (base + topY) * 0.5;
       positions[k * 3 + 2] = minZ + (cj + 0.5) * voxelSize;
       yScales[k] = topY - base;
-      colors[k] = (((ao * 255) | 0) * 0x1000000 + ramp(heightsM[idx])) >>> 0;
+      colors[k] = (((ao * 255) | 0) * 0x1000000 + ramp(heightsM[idx], stops)) >>> 0;
       k++;
     }
   }

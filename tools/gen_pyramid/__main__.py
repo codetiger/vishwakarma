@@ -2,11 +2,13 @@
 
     cd tools && python -m gen_pyramid                  # build per config.toml
     cd tools && python -m gen_pyramid --max-zoom 7     # override a knob for a light run
+    cd tools && python -m gen_pyramid --jobs 1         # force the serial tiler
     cd tools && python -m gen_pyramid --self-test      # offline correctness check
 """
 
 from __future__ import annotations
 
+import os
 import sys
 
 from . import config, fetch, manifest, tiles
@@ -26,13 +28,16 @@ def main(argv=None) -> None:
 
     cfg = config.load()
     _apply_overrides(cfg, argv)
+    # Fan tiles across processes (a world zoom is tens of thousands of tiles);
+    # default to the spare cores, capped at 8. `--jobs 1` forces the serial path.
+    jobs = int(argv[argv.index("--jobs") + 1]) if "--jobs" in argv else min(os.cpu_count() or 1, 8)
     pyr = cfg.pyramid
     print("vishwakarma · height-tile pyramid")
     print(f"  bbox {cfg.region.min_lon},{cfg.region.min_lat} → "
-          f"{cfg.region.max_lon},{cfg.region.max_lat} · zoom {pyr.min_zoom}..{pyr.max_zoom}")
+          f"{cfg.region.max_lon},{cfg.region.max_lat} · zoom {pyr.min_zoom}..{pyr.max_zoom} · jobs {jobs}")
     src = fetch.dem(cfg)
     print(f"  source DEM: {src}")
-    stats = tiles.build(cfg, src)
+    stats = tiles.build(cfg, src, jobs=jobs)
     out = manifest.write(cfg, stats)
     print(f"  height range {stats['heightRange']} m · total {stats['totalBytes'] / 1e6:.1f} MB")
     print(f"  manifest → {out}")

@@ -40,7 +40,7 @@ self.onmessage = async (e: MessageEvent<ToWorker>) => {
   if (msg.type === 'voxelizeTile') {
     if (!proj || !store) return;
     try {
-      const { minX, minZ, maxX, maxZ, voxelSize } = msg;
+      const { minX, minZ, maxX, maxZ, voxelSize, palette } = msg;
       const z = proj.voxelToZoom(voxelSize);
       const cellCols = Math.max(1, Math.round((maxX - minX) / voxelSize));
       const side = cellCols + 2 * APRON;
@@ -61,13 +61,14 @@ self.onmessage = async (e: MessageEvent<ToWorker>) => {
         }
       }
 
-      const mesh = buildCell(heights, side, APRON, cellCols, voxelSize, minX, minZ);
+      const mesh = buildCell(heights, side, APRON, cellCols, voxelSize, minX, minZ, palette);
       post(
         {
           type: 'tile',
           id: msg.id,
           key: msg.key,
           voxelSize,
+          palette,
           count: mesh.count,
           positions: mesh.positions,
           colors: mesh.colors,

@@ -39,14 +39,19 @@ def covered_tiles(region, z: int) -> tuple[int, int, int, int]:
     """(x0, x1, y0, y1) inclusive tile-index range overlapping the lon/lat bbox.
 
     y grows southward, so the north edge (max_lat) maps to the smaller index.
+    Indices are clamped to [0, 2^z-1] so a whole-world bbox (lon ±180 → merc ±E,
+    lat ±85.06 → merc ≈ ±E) doesn't spill one tile past the grid (x1 would floor
+    to 2^z, y0 to -1).
     """
     sz = tile_span(z)
+    nmax = 2 ** z - 1
+    clamp = lambda i: min(max(i, 0), nmax)
     mx0, my0 = lonlat_to_merc(region.min_lon, region.min_lat)  # SW
     mx1, my1 = lonlat_to_merc(region.max_lon, region.max_lat)  # NE
-    x0 = int(math.floor((mx0 + E) / sz))
-    x1 = int(math.floor((mx1 + E) / sz))
-    y0 = int(math.floor((E - my1) / sz))  # north
-    y1 = int(math.floor((E - my0) / sz))  # south
+    x0 = clamp(int(math.floor((mx0 + E) / sz)))
+    x1 = clamp(int(math.floor((mx1 + E) / sz)))
+    y0 = clamp(int(math.floor((E - my1) / sz)))  # north
+    y1 = clamp(int(math.floor((E - my0) / sz)))  # south
     return x0, x1, y0, y1
 
 

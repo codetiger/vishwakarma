@@ -6,6 +6,8 @@
 // explicitly; the worker just voxelizes that rectangle. `key` routes the result
 // back to its cell.
 
+import type { PaletteId } from './voxel/buildMesh';
+
 export type ToWorker =
   | { type: 'load'; url: string }
   | {
@@ -17,6 +19,7 @@ export type ToWorker =
       maxX: number;
       maxZ: number;
       voxelSize: number;
+      palette: PaletteId;
     };
 
 export type FromWorker =
@@ -26,6 +29,9 @@ export type FromWorker =
       id: number;
       key: string;
       voxelSize: number;
+      /** Echoed back so the tile manager can drop results built with a superseded
+       *  palette (mirrors the `voxelSize` staleness check). */
+      palette: PaletteId;
       count: number;
       positions: Float32Array;
       /** One packed sRGB `0x00RRGGBB` colour per voxel. */

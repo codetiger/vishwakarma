@@ -1,8 +1,15 @@
 name: Deploy to GitHub Pages
 
-# Builds the height-tile pyramid (Python) and the voxel viewer (Vite), then
-# publishes web/dist to GitHub Pages. The pyramid is generated here rather than
-# committed, so the deploy always matches the current region/config.
+# Builds the voxel viewer (Vite) and publishes web/dist to GitHub Pages.
+#
+# Two modes, switched by the `VITE_TILE_BASE` repository variable
+# (Settings → Secrets and variables → Actions → Variables):
+#   • UNSET  → regional mode: generate the height-tile pyramid here (Python) and
+#     bundle it into the Pages artifact. Fine while the pyramid is small.
+#   • SET    → CDN mode: the (world-scale, ~1 GB) pyramid lives on object storage
+#     and is generated + `s3 sync`'d out-of-band (see tools/gen_pyramid). This
+#     workflow then skips the Python build entirely and points the viewer at the
+#     CDN, keeping only the viewer bundle on Pages.
 
 on:
   push:
@@ -22,11 +29,16 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      # Empty in regional mode; the viewer then falls back to the bundled pyramid.
+      VITE_TILE_BASE: ${{ vars.VITE_TILE_BASE }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # --- Pyramid build (regional mode only) -------------------------------
       - name: Set up Python
+        if: ${{ !vars.VITE_TILE_BASE }}
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -34,20 +46,24 @@ jobs:
           cache-dependency-path: tools/gen_pyramid/requirements.txt
 
       - name: Install pyramid generator deps
+        if: ${{ !vars.VITE_TILE_BASE }}
         run: pip install -r tools/gen_pyramid/requirements.txt
 
       # Cache the downloaded ETOPO bbox. Only the first run, or a region change in
       # config.toml, pays the download cost; later runs reuse it.
       - name: Cache DEM download
+        if: ${{ !vars.VITE_TILE_BASE }}
         uses: actions/cache@v4
         with:
           path: tools/gen_pyramid/_cache
           key: dem-${{ hashFiles('tools/gen_pyramid/config.toml') }}
 
       - name: Build height-tile pyramid
+        if: ${{ !vars.VITE_TILE_BASE }}
         working-directory: tools
         run: python -m gen_pyramid          # writes web/public/pyramid/
 
+      # --- Viewer build (both modes) ----------------------------------------
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
@@ -61,7 +77,9 @@ jobs:
 
       - name: Build viewer
         working-directory: web
-        run: npm run build              # web/public/pyramid/ is copied into web/dist/
+        # VITE_TILE_BASE (from the job env) is baked in; in CDN mode no pyramid is
+        # bundled, in regional mode web/public/pyramid/ is copied into web/dist/.
+        run: npm run build
 
       - name: Configure Pages
         uses: actions/configure-pages@v5

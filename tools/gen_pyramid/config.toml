@@ -1,11 +1,12 @@
 # Configuration for the height-tile pyramid generator.
 
 [region]
-# Bounding box fetched from the DEM (Afghanistan → Maldives by default).
-min_lon = 60.0
-min_lat = -1.0
-max_lon = 98.0
-max_lat = 38.0
+# Bounding box fetched from the DEM. Whole world by default (Web-Mercator limit
+# ±85.06° lat); shrink to a regional bbox for a faster build.
+min_lon = -180.0
+min_lat = -85.06
+max_lon = 180.0
+max_lat = 85.06
 
 [dem]
 # ETOPO 2022 (public domain, NOAA NCEI). 15″ tiled mosaic (≈460 m) or 30″/60″

@@ -1,81 +1,50 @@
-import { useMemo, useRef } from 'react';
-import { useFrame } from '@react-three/fiber';
+import { useEffect } from 'react';
+import { useThree } from '@react-three/fiber';
 import * as THREE from 'three';
 import { mapTheme } from '../mapTheme';
 
-// Deep-space backdrop: a camera-following inverted sphere with a near-black gradient
-// and procedural stars. It rides with the camera (so it sits at infinity, no parallax)
-// and ROTATES with the eye's position, so the starfield sweeps as you pan and turn —
-// never a static flat backdrop. depthWrite off so all terrain draws over it. NOT
-// curvature-patched: it's the far backdrop the curved-away terrain is silhouetted on.
-const STAR_PAN_K = 0.0016; // radians of sky rotation per world unit panned
+// Deep-space backdrop: a WORLD-FIXED equirectangular sky map (ESO/S. Brunier "The
+// Milky Way panorama", CC BY 3.0) set as `scene.background`. three.js renders an
+// equirectangular background at infinity in a constant world orientation, so the
+// globe (world-fixed in ECEF) and the sky share one frame — orbit the planet and
+// the stars track exactly, no parallax and no fudge rotation. It flows through the
+// post chain, so Bloom lifts the brightest stars (the subtle-realistic look) and
+// N8AO ignores it (no depth). Tune brightness + tilt via `mapTheme.space`.
+// Loaded from public/textures/ via the BASE_URL idiom so GitHub Pages sub-paths work.
+const SKY_URL = new URL(
+  `${import.meta.env.BASE_URL}textures/space.jpg`,
+  document.baseURI,
+).href;
 
 export default function Skydome() {
-  const ref = useRef<THREE.Group>(null);
-  const material = useMemo(
-    () =>
-      new THREE.ShaderMaterial({
-        side: THREE.BackSide,
-        depthWrite: false,
-        uniforms: {
-          top: { value: new THREE.Color(mapTheme.palette.skyTop) },
-          horizon: { value: new THREE.Color(mapTheme.palette.skyHorizon) },
-        },
-        vertexShader: /* glsl */ `
-          varying vec3 vDir;
-          void main() {
-            vDir = position;
-            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-          }
-        `,
-        // Direction-hashed stars: each cell of a direction-space grid may hold one
-        // round star; two layers (coarse bright + fine faint) for depth. Because the
-        // pattern is keyed on the view direction, turning/panning sweeps it.
-        fragmentShader: /* glsl */ `
-          varying vec3 vDir;
-          uniform vec3 top;
-          uniform vec3 horizon;
-          float hash(vec3 p){
-            p = fract(p * 0.3183099 + vec3(0.1, 0.2, 0.3));
-            p *= 17.0;
-            return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
-          }
-          float stars(vec3 dir, float density, float thresh){
-            vec3 g = dir * density;
-            vec3 id = floor(g);
-            vec3 f = fract(g) - 0.5;
-            float on = step(thresh, hash(id));
-            float pt = smoothstep(0.5, 0.0, length(f)) * (0.4 + 0.6 * hash(id + 7.3));
-            return on * pt;
-          }
-          void main(){
-            vec3 dir = normalize(vDir);
-            float h = dir.y * 0.5 + 0.5;
-            vec3 sky = mix(horizon, top, smoothstep(0.0, 0.85, h));
-            float s = stars(dir, 150.0, 0.986) + 0.6 * stars(dir, 320.0, 0.992);
-            gl_FragColor = vec4(sky + vec3(s) * vec3(0.9, 0.95, 1.0), 1.0);
-          }
-        `,
-      }),
-    [],
-  );
+  const scene = useThree((s) => s.scene);
+  const gl = useThree((s) => s.gl);
 
-  // Center on the camera (so it's at infinity) and size to just inside the far plane.
-  // Rotate the whole sky by the eye's position so the stars sweep as you roam.
-  useFrame(({ camera }) => {
-    const g = ref.current;
-    if (!g) return;
-    g.position.copy(camera.position);
-    const far = (camera as THREE.PerspectiveCamera).far ?? 400;
-    g.scale.setScalar(far * 0.9);
-    g.rotation.set(camera.position.z * STAR_PAN_K, -camera.position.x * STAR_PAN_K, 0);
-  });
+  useEffect(() => {
+    const fallback = new THREE.Color(mapTheme.palette.skyTop);
+    let tex: THREE.Texture | null = null;
+    let cancelled = false;
 
-  return (
-    <group ref={ref}>
-      <mesh material={material} frustumCulled={false}>
-        <sphereGeometry args={[1, 48, 24]} />
-      </mesh>
-    </group>
-  );
+    new THREE.TextureLoader().load(SKY_URL, (loaded) => {
+      if (cancelled) {
+        loaded.dispose();
+        return;
+      }
+      tex = loaded;
+      tex.colorSpace = THREE.SRGBColorSpace;
+      tex.mapping = THREE.EquirectangularReflectionMapping;
+      tex.anisotropy = gl.capabilities.getMaxAnisotropy();
+      scene.background = tex;
+      scene.backgroundIntensity = mapTheme.space.intensity;
+      scene.backgroundRotation = new THREE.Euler(...mapTheme.space.rotation);
+    });
+
+    return () => {
+      cancelled = true;
+      if (scene.background === tex) scene.background = fallback;
+      tex?.dispose();
+    };
+  }, [scene, gl]);
+
+  return null;
 }

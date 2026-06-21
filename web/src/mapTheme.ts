@@ -9,10 +9,19 @@
 export interface MapTheme {
   palette: {
     water: string;
-    /** Deep-space backdrop: skyTop = zenith (near-black), skyHorizon = a touch lighter
-     *  low in the sky. Both dark — the starfield is the feature, not a gradient. */
+    /** Fallback backdrop colour shown until the equirectangular sky map loads (and
+     *  if it fails). Near-black — the sky map is the feature. */
     skyTop: string;
-    skyHorizon: string;
+  };
+  /** Deep-space backdrop: a world-fixed equirectangular sky map set as
+   *  `scene.background` (the asset lives in `public/textures/`, loaded by
+   *  `Skydome.tsx`). */
+  space: {
+    /** `scene.backgroundIntensity` — brightness of the sky map (subtle ≈ 0.4). */
+    intensity: number;
+    /** `scene.backgroundRotation` Euler [x, y, z] in radians — a fixed celestial
+     *  tilt to frame the Milky Way band. */
+    rotation: [number, number, number];
   };
   lighting: {
     keyColor: string;
@@ -53,13 +62,11 @@ export interface MapTheme {
      *  screen-space `ao` above cannot reach. */
     aoFloor: number;
   };
-  /** round-world signature: larger = horizon falls away sooner. */
-  curvature: number;
-  /** Distance-based LOD clipmap view: the camera roams just above the terrain
-   *  (height locked to the surface below it); the whole area is covered by a
-   *  coarse `baseVoxel` base, and detail sharpens in concentric rings toward the
-   *  camera. Each cell renders at exactly one resolution (no overlap). All
-   *  distances are world units; rendering is 1:1 with world space. */
+  /** Geospatial orbit view: the camera orbits a focus point on the GLOBE; the
+   *  whole area is covered by a coarse `baseVoxel` base, and detail sharpens in
+   *  concentric rings toward the focus. Each cell renders at exactly one
+   *  resolution (no overlap). All distances are world units; the flat clipmap is
+   *  bent onto the sphere by the curvature.ts vertex shader. */
   view: {
     /** Coarsest voxel size — the base layer covering the whole visible area, and
      *  the slider's maximum. */
@@ -88,25 +95,37 @@ export interface MapTheme {
      *  HEAVY: the fine disk grows with altitude, so each +1 roughly QUADRUPLES the
      *  finest-disk cell/draw-call count — raise with care. */
     lodBias: number;
-    /** Load cells out to this radius from the focus (≈ camera far reach). */
-    maxRadius: number;
-    /** Eye height above the (smoothed) terrain directly beneath it. */
+    /** Near reference distance (world units). Also the pan-speed scale base. */
     cameraHeight: number;
-    /** Camera altitude range above terrain (world Y units). minAltitude also sets
-     *  the altitude at which the LOD shows the finest level (L0 = 0); maxAltitude
-     *  the coarse-overview ceiling. The wheel zoom maps onto this range. */
+    /** The radial altitude at which the LOD reaches its finest level (L0 = 0);
+     *  also sets the closest orbit distance (D_MIN = minAltitude / sin(pitch)). */
     minAltitude: number;
-    maxAltitude: number;
-    /** Downward look angle, radians (fixed pitch — terrain-independent aim). */
+    /** Opening / default downward look angle, radians. Seeds the user-adjustable
+     *  tilt (middle-drag changes it) and is the angle the compass reset eases back
+     *  to. pitch = π/2 looks straight down (nadir); pitch → 0 looks at the horizon. */
     pitch: number;
+    /** Tilt limits for middle-drag (radians). pitchMin ≈ near-horizon "from the
+     *  ground plane" view; pitchMax ≈ nadir (kept a hair off π/2 so the camera-up
+     *  basis never collapses). */
+    pitchMin: number;
+    pitchMax: number;
+    /** Middle-drag vertical sensitivity: radians of tilt per pixel dragged. */
+    tiltSpeed: number;
     /** Guard on how fine the slider may go (per-cell dense-grid budget). */
     maxCellVoxels: number;
-    /** Eye inset from the map edge (world units), fixed at every zoom so the
-     *  framing doesn't jump as you zoom and coastal regions stay reachable.
-     *  Small enough to roam right up to the coast; the world rim beyond curves
-     *  down (round-world shader) into the starfield. Auto-capped to 40% of each
-     *  span. */
-    edgeMargin: number;
+    /** Outer zoom limit as a multiple of the globe radius (D_MAX = maxDistR·R) —
+     *  far enough to frame the whole globe in space, no region cap. */
+    maxDistR: number;
+    /** Opening orbit distance as a multiple of the globe radius. */
+    initialDistR: number;
+    /** Zoom-toward-cursor strength (0 = zoom to centre, 1 = snap focus to cursor). */
+    cursorBias: number;
+    /** Straighten the tilt to top-down as you zoom out: below `straightenNearR·R`
+     *  the camera honours the user's tilt (oblique surface roam); above
+     *  `straightenFarR·R` the effective pitch is forced to nadir, so the eye pulls
+     *  radially up over the area (top-down, area centred). Smoothstep between them. */
+    straightenNearR: number;
+    straightenFarR: number;
   };
 }
 
@@ -114,8 +133,11 @@ export interface MapTheme {
 export const mapTheme: MapTheme = {
   palette: {
     water: "#27496b", // deep indigo water
-    skyTop: "#01030a", // the void at zenith
-    skyHorizon: "#070b18", // a touch lighter low in the sky (subtle, the stars carry it)
+    skyTop: "#01030a", // the void — fallback until the sky map loads
+  },
+  space: {
+    intensity: 0.4, // subtle: the sky sits behind the terrain, bloom lifts the brightest stars
+    rotation: [0.0, 0.0, 0.3], // tilt the Milky Way band off horizontal
   },
   lighting: {
     keyColor: "#ffe1b0", // low moon-gold key
@@ -145,10 +167,6 @@ export const mapTheme: MapTheme = {
     },
     aoFloor: 0.55,
   },
-  // Slight round-world bend: the patch under the eye stays level and the rim
-  // falls away in every direction, so the far edge curves down into the haze
-  // instead of ending as a flat sea cut against the sky. Larger = sooner.
-  curvature: 0.0009,
   view: {
     baseVoxel: 3.0,
     cellCols: 8, // columns per tile: smaller ⇒ cheaper tiles that stream in faster
@@ -159,12 +177,17 @@ export const mapTheme: MapTheme = {
     lodLevels: 6, // overwritten at load from the manifest zoom span (App.tsx)
     lodBandCells: 8, // finest-disk radius in cells; bigger = more fine area + more tiles
     lodBias: 2, // detail appears ~2 octaves (≈67% zoom) earlier; 3 ≈ the 50% zoom midpoint but ~4× heavier
-    maxRadius: 360,
-    cameraHeight: 30, // base eye altitude above terrain (zoom scales it)
+    cameraHeight: 30, // near reference distance + pan-speed base
     minAltitude: 5, // closest the eye flies above ground → LOD shows the finest level (L0=0)
-    maxAltitude: 80, // coarse-overview ceiling → LOD shows the coarsest of its 3 levels
-    pitch: 0.95, // ~54° down — Google-Earth-like tilt
+    pitch: 0.95, // ~54° down — opening/default tilt (user changes it with middle-drag)
+    pitchMin: 0.18, // ~10° above horizon — the "from the ground plane" tilt limit
+    pitchMax: 1.55, // ≈ π/2 − 0.02 — nadir (top-down), kept off the up-vector singularity
+    tiltSpeed: 0.006, // middle-drag: radians of tilt per pixel of vertical drag
     maxCellVoxels: 30_000_000,
-    edgeMargin: 30,
+    maxDistR: 6, // zoom out to 6× the globe radius (whole globe in the starfield)
+    initialDistR: 3.2, // open framed on the globe (with starfield margin) so it's visible
+    cursorBias: 0.5, // zoom toward the cursor (Google-Earth feel)
+    straightenNearR: 0.5, // below 0.5×R: honour the user's tilt (oblique roam)
+    straightenFarR: 2.2, // above 2.2×R: force nadir (top-down on the area, centred)
   },
 };

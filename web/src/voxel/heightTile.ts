@@ -102,18 +102,21 @@ export class TileStore {
     return p;
   }
 
-  /** Preload every tile a sample inside this merc bbox (±1 sample) could read. */
+  /** Preload every tile a sample inside this merc bbox (±1 sample) could read.
+   *  Longitude (tile x) WRAPS at the antimeridian; latitude (tile y) does not. */
   async ensureCover(mnX: number, mnY: number, mxX: number, mxY: number, z: number): Promise<void> {
     const p = this.res(z);
     const N = this.N;
+    const T = 2 ** z; // tiles per axis at this zoom
     const colMin = Math.floor((mnX + E) / p - 0.5) - 1;
     const colMax = Math.ceil((mxX + E) / p - 0.5) + 1;
     const rowMin = Math.floor((E - mxY) / p - 0.5) - 1; // north edge → smaller row
     const rowMax = Math.ceil((E - mnY) / p - 0.5) + 1;
     const jobs: Promise<unknown>[] = [];
     for (let ty = Math.floor(rowMin / N); ty <= Math.floor(rowMax / N); ty++) {
-      for (let tx = Math.floor(colMin / N); tx <= Math.floor(colMax / N); tx++) {
-        if (tx < 0 || ty < 0) continue;
+      if (ty < 0 || ty >= T) continue; // off the poles — no data, no wrap
+      for (let txRaw = Math.floor(colMin / N); txRaw <= Math.floor(colMax / N); txRaw++) {
+        const tx = ((txRaw % T) + T) % T; // wrap longitude across the antimeridian
         jobs.push(this.load(z, tx, ty));
       }
     }
@@ -126,9 +129,12 @@ export class TileStore {
     await Promise.all(jobs);
   }
 
-  /** One sample (col,row) on the global grid, read from its home tile. 0 if absent. */
+  /** One sample (col,row) on the global grid, read from its home tile. 0 if absent.
+   *  Longitude (col) WRAPS at the antimeridian so samples cross it seamlessly. */
   private at(col: number, row: number, z: number): number {
     const N = this.N;
+    const cols = N * 2 ** z; // total columns around the globe at this zoom
+    col = ((col % cols) + cols) % cols;
     const tx = Math.floor(col / N);
     const ty = Math.floor(row / N);
     const t = this.cache.get(`${z}/${tx}/${ty}`);

@@ -7,8 +7,10 @@ Guidance for Claude Code working in this repository.
 `vishwakarma` is a browser **voxel terrain viewer**. An offline Python tool turns
 a DEM into a global **Web-Mercator height-tile pyramid**; the web viewer streams
 those tiles and voxelizes them in a pool of JS Web Workers, with distance-based
-LOD as you roam — rendered with a round-world horizon, radial fog, screen-space
-AO, and bloom. There is **no Rust/wasm** — the whole runtime is Python (offline
+LOD as you roam. The flat-mercator voxels are projected onto a **3D globe** in the
+vertex shader and explored with a Google-Earth-style orbit camera — zoom from
+surface detail out to the whole earth in a starfield, rendered with screen-space
+AO and bloom. There is **no Rust/wasm** — the whole runtime is Python (offline
 tiling) + TypeScript (browser). Each module carries a header comment documenting
 its piece of the pipeline.
 
@@ -76,32 +78,73 @@ cd web && npm install && npm run dev              # http://localhost:5173
   four finer children toward the camera, and a parent stays visible until all its
   children load, then they swap in atomically (never a coarse flash). One
   `InstancedMesh` per cell.
-- `src/scene/RoamControls.tsx` — Google-Earth-style oblique roam: the eye flies at
-  a fixed altitude above the terrain (drag/WASD pan, shift-drag/Q-E turn, wheel
-  zoom), publishing the eye as the shared LOD/fog centre.
-- `src/scene/curvature.ts` — the **round-world** shader: bends every ground vertex
-  down by squared distance from a moving centre, plus radial fog, injected into the
-  terrain material via `onBeforeCompile`. All ground materials share its uniforms.
+- `src/scene/RoamControls.tsx` — the **geospatial orbit camera** (Google-Earth
+  style): the camera orbits a FOCUS point on the globe at a wheel-driven distance +
+  heading + an adjustable **tilt** (`userPitch`; π/2 = top-down/nadir, → 0 = horizon).
+  Left-drag is a **rigid globe rotation** (sphere-raycast, the grabbed point tracks
+  the cursor) that carries `heading` along, so dragging over a pole stays continuous
+  (no gimbal); a drag that **starts off the globe does nothing** (pointerdown
+  hit-guard). **Middle-drag** changes orientation: horizontal = heading, vertical =
+  tilt (drag down → near-horizon "from the ground plane" view). Wheel zooms toward
+  the cursor with no region cap; as you zoom out the effective pitch **straightens to
+  nadir** (`straightenNearR`/`straightenFarR`) so the eye rises radially over the
+  area (top-down, area centred) — it always looks at the focus, no swing to the globe
+  centre. Right-drag rotates heading only; WASD pans, Q/E turn; the compass resets
+  both heading and tilt. Publishes the flat focus (LOD centre), plus
+  `surfaceAltitude` + `heading` to `cameraControls`.
+- `src/scene/globe.ts` — the **single source of truth** for the flat-mercator↔
+  sphere mapping (`GLOBE_R`, `flatToECEF`, `ecefToFlat`, `enuBasis`,
+  `worldToLonLat`, `lonLatToWorld`, `visibleCapBounds`, `selfTest`). The GPU shader
+  and the CPU camera both use it, so eye and ground land in the same ECEF space —
+  keep the shader's GLSL in sync with it (like the two tile decoders).
+  `visibleCapBounds` gives the flat-Mercator bbox of the visible spherical cap (the
+  clipmap's root-scan window — Mercator-correct so coverage holds near the poles).
+- `src/scene/curvature.ts` — the **sphere-projection** vertex shader (mirrors
+  `globe.ts`): maps each flat ground vertex onto the globe (flat X/Z → lon/lat →
+  sphere direction; height → radial axis), injected via `onBeforeCompile`. Every
+  ground material shares its uniforms (`uHeightScale`). (`applyWorldCurvature` keeps
+  its name for the call site.)
+- `src/scene/cameraControls.ts` — the shared imperative bridge between the on-screen
+  UI and RoamControls (live `heading`/`surfaceAltitude`; `zoomBy`/`resetNorth`
+  intents), mirroring the `curveUniforms` shared-singleton idiom.
+- `src/scene/PolarCaps.tsx` — two ice-cap meshes (in ECEF, not through the
+  projection shader) that fill the polar gaps left by Mercator's ±85° limit.
 - `src/scene/PostFx.tsx` — N8AO (screen-space AO sized to the voxel) + Bloom +
-  ACES tone-mapping + SMAA + Vignette. `Skydome.tsx` / `LightingRig.tsx` are the
-  gradient backdrop + lights.
+  ACES tone-mapping + SMAA + Vignette. `Skydome.tsx` sets the **world-fixed
+  equirectangular sky map** (ESO/S. Brunier panorama, CC BY 3.0, in
+  `public/textures/`) as `scene.background` — fixed in world space so it stays
+  synced with the globe, no mesh/camera-follow. `LightingRig.tsx` is the lights.
+  Sky brightness + tilt are `mapTheme.space`; `palette.skyTop` is the load fallback.
 - `src/mapTheme.ts` — the **single art-direction surface**: palette, lighting,
-  post FX, curvature, and the `view` block (camera height/pitch, fog, LOD radius,
-  `baseVoxel`, `cellCols`). Tune the whole look + framing here; the scene-graph
+  post FX, the `space` block (sky-map brightness + tilt), and the `view` block
+  (camera pitch, orbit-distance range, LOD, `baseVoxel`, `cellCols`). Tune the whole
+  look + framing here; the scene-graph
   modules read from it.
+- On-screen nav UI (zoom +/− + compass) lives in `src/App.tsx` (styled in
+  `src/styles.css`), wired to `cameraControls`.
 
 ## Conventions
 
 - **Keep the two decoders in sync.** The tile byte layout is defined in
   `tools/gen_pyramid/encode.py` and decoded in `web/src/voxel/heightTile.ts` —
   change both together.
+- **Keep the globe mapping in sync.** The flat↔sphere math lives in
+  `web/src/scene/globe.ts`; the GLSL in `curvature.ts` mirrors `flatToECEF` and the
+  camera in `RoamControls.tsx` uses the TS helpers. Change them together (run
+  `globe.ts`'s `selfTest`), or the eye and the rendered ground drift apart.
 - **Tiles stay heights-only.** Anything that can be derived per-voxel (colour, AO,
-  cull, skirt) lives in `buildMesh.ts`, not in the tile.
+  cull, skirt) lives in `buildMesh.ts`, not in the tile. The flat clipmap, worker,
+  and voxelizer all stay FLAT — only the GPU shader + the camera know about the sphere.
+- **Longitude wraps, latitude doesn't.** The antimeridian is seamless: the tile
+  sampler (`heightTile.ts`), `ensureCover`, and the clipmap (`TileField.tsx` off-map
+  test) all wrap X modulo the global grid, and the shader's lon is periodic. Latitude
+  is bounded — the polar gap is filled by `PolarCaps.tsx` and the camera focus is
+  clamped a few degrees short of the pole (`RoamControls.tsx`) to dodge the singularity.
 - **`mapTheme.ts` is the only place to tune the look + framing.** Palette,
-  lighting, post FX, curvature, camera, fog, and LOD radius all live there — don't
-  scatter those constants into the scene modules.
-- **Every ground material must share the curvature shader** (`applyWorldCurvature`
-  + the shared `curveUniforms`), or it detaches from the curved terrain.
+  lighting, post FX, camera pitch, orbit-distance range, and LOD all live there —
+  don't scatter those constants into the scene modules.
+- **Every ground material must run the sphere projection** (`applyWorldCurvature`
+  + the shared `curveUniforms`), or it detaches from the globe.
 - **No per-voxel colour cross-fade.** `buildCell` colours each voxel from the exact
   hypsometric ramp. If you implement a neighbour blend, thread a `blendRadius`
   through the worker message (`voxelTypes.ts`) and a theme knob in `mapTheme.ts`.
