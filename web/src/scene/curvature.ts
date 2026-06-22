@@ -24,6 +24,11 @@ export const curveUniforms = {
   // all terrain instantly with no re-voxelization. Keep terrain.ts's heightScale
   // in sync (set both together) so the camera follows the exaggerated surface.
   uHeightScale: { value: 1 },
+  // Baked-AO floor (= mapTheme.post.aoFloor; 1 ⇒ AO off). The per-voxel AO byte is
+  // folded into the instance colour in the vertex shader, so this is a live uniform
+  // (no re-voxelize). TileField sets it from the theme. Shared singleton like
+  // uHeightScale — one write re-floors every projected material at once.
+  uAoFloor: { value: 1 },
 };
 
 // Constants injected so the GLSL matches globe.ts exactly. WS_OVER_E folds the
@@ -31,11 +36,22 @@ export const curveUniforms = {
 //   lon = (X·WORLD_SCALE_XZ − E)/E·π = (X·WS_OVER_E − 1)·π
 const WS_OVER_E = WORLD_SCALE_XZ / E;
 
+// Replaces #include <project_vertex>. When VOXEL_INSTANCING is defined (the voxel
+// clipmap material), the unit box is placed from the per-instance attributes FIRST
+// — this is what the old per-voxel instanceMatrix did, now built on the GPU — then
+// the unchanged sphere projection runs on the placed flat position. `transformed`
+// is reassigned (begin_vertex already declared it); `mvPosition` ends as the
+// view-space position, so the later `vViewPosition = -mvPosition.xyz` (flat-shading
+// normals) stays correct. Non-instanced ground materials skip the box step and
+// project `position` directly.
 const SPHERE_VERTEX = /* glsl */ `
-  vec4 mvPosition = vec4( transformed, 1.0 );
-  #ifdef USE_INSTANCING
-    mvPosition = instanceMatrix * mvPosition;
+  #ifdef VOXEL_INSTANCING
+    transformed = transformed * vec3( aVoxel, aCenterScale.w, aVoxel ) + aCenterScale.xyz;
+    // Fold baked AO in sRGB space (matches the old setColorAt path), then linearize.
+    float aoF = uAoFloor + ( 1.0 - uAoFloor ) * aColor.a;
+    vBaseColor = srgbToLinear( aColor.rgb * aoF );
   #endif
+  vec4 mvPosition = vec4( transformed, 1.0 );
   vec4 worldPos = modelMatrix * mvPosition;        // flat world (X, Y, -Z)
   float lon = ( worldPos.x * WS_OVER_E - 1.0 ) * PI;
   float mny = ( (-worldPos.z) * WS_OVER_E - 1.0 ) * PI;   // un-negate Z
@@ -49,22 +65,47 @@ const SPHERE_VERTEX = /* glsl */ `
 
 const SPHERE_HEADER = /* glsl */ `
 uniform float uHeightScale;
+uniform float uAoFloor;
 #define PI 3.141592653589793
 #define HALF_PI 1.5707963267948966
 const float WS_OVER_E = ${WS_OVER_E};
 const float GLOBE_R = ${GLOBE_R};
+#ifdef VOXEL_INSTANCING
+  attribute vec4 aCenterScale;   // (centreX, centreY, -centreZ, yScale)
+  attribute float aVoxel;        // box X/Z extent (cell voxel size)
+  attribute vec4 aColor;         // sRGB rgb + baked AO (alpha), normalized 0..1
+  varying vec3 vBaseColor;       // constant per instance → no interpolation needed
+  vec3 srgbToLinear( vec3 c ) {
+    return mix( pow( ( c + 0.055 ) / 1.055, vec3( 2.4 ) ), c / 12.92, step( c, vec3( 0.04045 ) ) );
+  }
+#endif
+`;
+
+// Carries the folded instance colour to the fragment stage; multiplied into the
+// diffuse there (replaces the old instanceColor path).
+const FRAG_HEADER = /* glsl */ `
+#ifdef VOXEL_INSTANCING
+  varying vec3 vBaseColor;
+#endif
 `;
 
 // Name kept for the existing call site in TileField; it now installs the sphere
-// projection (no curvature arg).
+// projection (no curvature arg). The voxel material additionally sets
+// material.defines.VOXEL_INSTANCING to enable the per-instance box transform +
+// colour fold above.
 export function applyWorldCurvature(material: THREE.Material): void {
   material.onBeforeCompile = (shader) => {
-    // Assign the SHARED uniform object (not a copy): one per-frame write to
-    // uHeightScale updates this material along with every other projected one.
+    // Assign the SHARED uniform objects (not copies): one per-frame write to
+    // uHeightScale / uAoFloor updates this material along with every projected one.
     shader.uniforms.uHeightScale = curveUniforms.uHeightScale;
+    shader.uniforms.uAoFloor = curveUniforms.uAoFloor;
     shader.vertexShader = `${SPHERE_HEADER}\n${shader.vertexShader}`.replace(
       '#include <project_vertex>',
       SPHERE_VERTEX,
+    );
+    shader.fragmentShader = `${FRAG_HEADER}\n${shader.fragmentShader}`.replace(
+      '#include <color_fragment>',
+      '#include <color_fragment>\n  #ifdef VOXEL_INSTANCING\n  diffuseColor.rgb *= vBaseColor;\n  #endif',
     );
   };
   material.needsUpdate = true;

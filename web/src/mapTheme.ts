@@ -169,13 +169,18 @@ export const mapTheme: MapTheme = {
   },
   view: {
     baseVoxel: 3.0,
-    cellCols: 8, // columns per tile: smaller ⇒ cheaper tiles that stream in faster
-    // & more incrementally (the worker pool absorbs the higher tile count), finer
-    // LOD granularity, and a finer reachable voxel size (the min-size budget ∝
-    // cellCols²). Trade-off: more tiles ⇒ more draw calls and a thicker apron share
-    // per tile — bump back toward 12–16 if draw-call count hurts the frame rate.
+    cellCols: 12, // columns per tile. Bigger cells ⇒ fewer InstancedMesh draw calls
+    // (each covers ~(12/8)²≈2.25× the area), paid for by more voxels per cell — fine
+    // now that the GPU places every box from per-instance attributes (no main-thread
+    // per-voxel loop; see buildMesh.ts/curvature.ts). The fine-disk CELL count is
+    // ~π·lodBandCells² (independent of cellCols), so lodBandCells is trimmed below to
+    // keep the fine voxel budget + detail radius ~steady while draw calls drop.
+    // Tuning knob: 12–16 trades draw calls for per-cell voxels (validate FPS +
+    // renderer.info.render.calls on target hardware).
     lodLevels: 6, // overwritten at load from the manifest zoom span (App.tsx)
-    lodBandCells: 8, // finest-disk radius in cells; bigger = more fine area + more tiles
+    lodBandCells: 6, // finest-disk radius in cells. Trimmed 8→6 alongside cellCols
+    // 8→12 so the fine disk's world radius (∝ cellCols·lodBandCells) stays ~steady
+    // while the fine-disk draw-call count (∝ lodBandCells²) drops ~45%.
     lodBias: 2, // detail appears ~2 octaves (≈67% zoom) earlier; 3 ≈ the 50% zoom midpoint but ~4× heavier
     cameraHeight: 30, // near reference distance + pan-speed base
     minAltitude: 5, // closest the eye flies above ground → LOD shows the finest level (L0=0)

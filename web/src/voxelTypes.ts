@@ -33,12 +33,12 @@ export type FromWorker =
        *  palette (mirrors the `voxelSize` staleness check). */
       palette: PaletteId;
       count: number;
-      positions: Float32Array;
-      /** One packed sRGB `0x00RRGGBB` colour per voxel. */
-      colors: Uint32Array;
-      /** Per-voxel Y (height) scale, world units. Surface voxels are stretched so
-       *  their top face lands on the exact terrain height; the rest are voxelSize. */
-      yScales: Float32Array;
+      /** GPU-ready per-instance data (no main-thread rebuild). Wrapped directly in
+       *  InstancedBufferAttributes by TileField. count*4: (centreX, centreY,
+       *  -centreZ, yScale) — Z negated for north-up; yScale is the box height. */
+      iCenterScale: Float32Array;
+      /** count*4 bytes: sRGB r,g,b + baked-AO in alpha (normalized in the shader). */
+      iColor: Uint8Array;
     }
   | { type: 'error'; id?: number; message: string };
 

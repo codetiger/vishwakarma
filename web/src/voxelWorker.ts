@@ -70,11 +70,10 @@ self.onmessage = async (e: MessageEvent<ToWorker>) => {
           voxelSize,
           palette,
           count: mesh.count,
-          positions: mesh.positions,
-          colors: mesh.colors,
-          yScales: mesh.yScales,
+          iCenterScale: mesh.iCenterScale,
+          iColor: mesh.iColor,
         },
-        [mesh.positions.buffer, mesh.colors.buffer, mesh.yScales.buffer],
+        [mesh.iCenterScale.buffer, mesh.iColor.buffer],
       );
     } catch (err) {
       post({ type: 'error', id: msg.id, message: String(err) });

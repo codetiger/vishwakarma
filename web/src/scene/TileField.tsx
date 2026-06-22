@@ -2,7 +2,7 @@ import { useMemo, useRef } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
 import * as THREE from 'three';
 import { mapTheme } from '../mapTheme';
-import { applyWorldCurvature } from './curvature';
+import { applyWorldCurvature, curveUniforms } from './curvature';
 import { GLOBE_R, flatToECEF, visibleCapBounds, type CapBounds } from './globe';
 import { cameraControls } from './cameraControls';
 import type { PaletteId } from '../voxel/buildMesh';
@@ -52,7 +52,7 @@ interface Node {
   ix: number;
   iz: number;
   voxel: number;
-  mesh: THREE.InstancedMesh | null;
+  mesh: THREE.Mesh | null;
   requested: boolean;
   visited: boolean;
   culled: boolean; // behind the camera — don't refine/draw, but keep as fallback
@@ -60,53 +60,52 @@ interface Node {
   childrenCover: boolean;
 }
 
-function buildMesh(msg: TileMsg, material: THREE.Material): THREE.InstancedMesh {
-  const { count, positions, colors, yScales, voxelSize } = msg;
-  const mesh = new THREE.InstancedMesh(UNIT, material, Math.max(count, 1));
+// Wrap the worker's GPU-ready buffers in a per-cell InstancedBufferGeometry. The
+// vertex shader (curvature.ts, VOXEL_INSTANCING) places each unit box from the
+// per-instance attributes and folds in the baked AO + sRGB colour — so there is NO
+// per-voxel work on the main thread (no 16-float matrix, no setColorAt). A plain
+// Mesh + InstancedBufferGeometry still draws instanced (three checks
+// isInstancedBufferGeometry at draw time); we avoid InstancedMesh precisely so no
+// unused instanceMatrix is allocated/uploaded.
+function buildMesh(msg: TileMsg, material: THREE.Material): THREE.Mesh {
+  const { count, iCenterScale, iColor, voxelSize } = msg;
+  const g = new THREE.InstancedBufferGeometry();
+  // Share the unit box's static attributes by reference (24 verts, identical for
+  // every cell); only the small per-instance attributes are per-cell. disposeCell
+  // detaches these before dispose() so the shared buffers survive eviction.
+  g.setIndex(UNIT.index);
+  g.setAttribute('position', UNIT.getAttribute('position'));
+  g.setAttribute('normal', UNIT.getAttribute('normal'));
+  g.setAttribute('uv', UNIT.getAttribute('uv'));
+  g.instanceCount = count;
+  // (centreX, centreY, -centreZ, yScale); the box X/Z extent (voxel size, constant
+  // per cell — one native .fill, not a per-voxel loop); and sRGB+AO as normalized
+  // bytes (rgb + AO in alpha).
+  g.setAttribute('aCenterScale', new THREE.InstancedBufferAttribute(iCenterScale, 4));
+  g.setAttribute('aVoxel', new THREE.InstancedBufferAttribute(new Float32Array(count).fill(voxelSize), 1));
+  g.setAttribute('aColor', new THREE.InstancedBufferAttribute(iColor, 4, true));
+  const mesh = new THREE.Mesh(g, material);
   // Frustum culling OFF: the sphere projection (curvature.ts) moves vertices from
   // their flat position onto the globe in the vertex shader, but three's CPU cull
   // tests the undisplaced (flat) bounding sphere — so tiles whose flat position is
   // off-frustum but whose projected position is in view (the curved limb) would be
   // wrongly culled and pop. The quadtree already bounds the drawn set.
   mesh.frustumCulled = false;
-  const m = mesh.instanceMatrix.array as Float32Array;
-  for (let i = 0; i < count; i++) {
-    const o = 16 * i;
-    const p = 3 * i;
-    // X/Z extent is the voxel size; Y is per-voxel — surface voxels are stretched
-    // so their top face meets the exact terrain height (their centre, in
-    // positions[], is already placed for that height), the rest are voxelSize.
-    m[o] = voxelSize; m[o + 1] = 0; m[o + 2] = 0; m[o + 3] = 0;
-    m[o + 4] = 0; m[o + 5] = yScales[i]; m[o + 6] = 0; m[o + 7] = 0;
-    m[o + 8] = 0; m[o + 9] = 0; m[o + 10] = voxelSize; m[o + 11] = 0;
-    // negate z → north up (translation only; the cube itself is not mirrored)
-    m[o + 12] = positions[p]; m[o + 13] = positions[p + 1]; m[o + 14] = -positions[p + 2]; m[o + 15] = 1;
-  }
-  mesh.instanceMatrix.needsUpdate = true;
-  const c = new THREE.Color();
-  const aoFloor = mapTheme.post.aoFloor;
-  for (let i = 0; i < count; i++) {
-    // Packed 0xAARRGGBB: sRGB in the low 24 bits (blended at voxelize time), the
-    // baked ambient-occlusion byte (255 = open) in the top 8. Fold the AO straight
-    // into the instance colour — the UNIT geometry is shared across every tile
-    // mesh, so a per-instance attribute would force a geometry clone per tile;
-    // folding into the colour is the instancing-friendly fit and stacks with the
-    // screen-space AO in PostFx. (It dims albedo, so it also dims what Bloom sees
-    // — intended for the stylised look.)
-    const packed = colors[i];
-    const ao = ((packed >>> 24) & 0xff) / 255;
-    const f = aoFloor + (1 - aoFloor) * ao; // aoFloor = 1 → baked AO off
-    c.setRGB(
-      (((packed >> 16) & 0xff) / 255) * f,
-      (((packed >> 8) & 0xff) / 255) * f,
-      ((packed & 0xff) / 255) * f,
-      THREE.SRGBColorSpace,
-    );
-    mesh.setColorAt(i, c);
-  }
-  if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-  mesh.count = count;
   return mesh;
+}
+
+// Tear down a cell mesh: pull it from the scene and free its GPU buffers. The static
+// box attributes are SHARED (UNIT) across every cell, so detach them before
+// dispose() — three's dispose frees the GPU buffer of each attribute it still
+// holds, and deleting a shared one would yank a buffer other cells are drawing with.
+function disposeCell(group: THREE.Group, mesh: THREE.Mesh): void {
+  group.remove(mesh);
+  const g = mesh.geometry;
+  g.deleteAttribute('position');
+  g.deleteAttribute('normal');
+  g.deleteAttribute('uv');
+  g.setIndex(null);
+  g.dispose();
 }
 
 interface Props {
@@ -131,10 +130,14 @@ export default function TileField({ voxelSize, palette, focus, bounds, workers, 
   const capB = useRef<CapBounds>({ xC: 0, xHalf: 0, zMin: 0, zMax: 0 }); // scratch: visible cap bbox
   // Previous-density meshes held on screen during a density change, until the new
   // grid fully covers the view and we swap atomically (no drop to the coarse base).
-  const retired = useRef<THREE.InstancedMesh[]>([]);
+  const retired = useRef<THREE.Mesh[]>([]);
 
   const material = useMemo(() => {
     const mat = new THREE.MeshStandardMaterial({ roughness: 0.95, metalness: 0.0, flatShading: true });
+    // Enable the per-instance box transform + colour fold in the projection shader
+    // (merge — don't clobber the STANDARD define the material sets in its ctor).
+    mat.defines = { ...(mat.defines ?? {}), VOXEL_INSTANCING: '' };
+    curveUniforms.uAoFloor.value = mapTheme.post.aoFloor; // baked-AO floor → live uniform
     applyWorldCurvature(mat);
     return mat;
   }, []);
@@ -170,8 +173,7 @@ export default function TileField({ voxelSize, palette, focus, bounds, workers, 
         if (!midSwap && n.mesh.visible) {
           retired.current.push(n.mesh); // stays in `group`, keeps rendering
         } else {
-          group.remove(n.mesh);
-          n.mesh.dispose();
+          disposeCell(group, n.mesh);
         }
       }
       map.clear();
@@ -203,7 +205,7 @@ export default function TileField({ voxelSize, palette, focus, bounds, workers, 
         n.requested = false;
         if (n.voxel !== msg.voxelSize) continue; // stale density
         if (msg.palette !== palette) continue; // stale palette (size unchanged)
-        if (n.mesh) { group.remove(n.mesh); n.mesh.dispose(); }
+        if (n.mesh) disposeCell(group, n.mesh);
         n.mesh = buildMesh(msg, material);
         n.mesh.visible = false; // visibility decided below
         group.add(n.mesh);
@@ -424,10 +426,7 @@ export default function TileField({ voxelSize, palette, focus, bounds, workers, 
       // frame. (If the camera roams far before that, the new grid simply finishes
       // covering the new view before the swap — the old detail holds until then.)
       if (ready) {
-        for (const m of retired.current) {
-          group.remove(m);
-          m.dispose();
-        }
+        for (const m of retired.current) disposeCell(group, m);
         retired.current = [];
         for (const rk of roots) setVis(rk, false);
       } else {
@@ -440,7 +439,7 @@ export default function TileField({ voxelSize, palette, focus, bounds, workers, 
     // Evict anything out of view this frame.
     for (const [key, n] of map) {
       if (!n.visited) {
-        if (n.mesh) { group.remove(n.mesh); n.mesh.dispose(); }
+        if (n.mesh) disposeCell(group, n.mesh);
         map.delete(key);
       }
     }

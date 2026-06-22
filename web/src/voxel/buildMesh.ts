@@ -10,15 +10,23 @@
 //    seals the crack. Skirt depth can't be baked into the tile (it depends on the
 //    neighbour's runtime LOD), so it lives here.
 //  • Baked AO — per-voxel openness from the height ring (radius AO_R): surrounding
-//    higher terrain darkens (valley floors, cliff bases), ridges stay bright. Goes
-//    in the colour's top byte, where the renderer folds it in (aoFloor).
+//    higher terrain darkens (valley floors, cliff bases), ridges stay bright. Carried
+//    in the colour's alpha byte; the vertex shader folds it in (uAoFloor).
+//
+// Output is GPU-ready per-instance data — no main-thread rebuild. The vertex shader
+// (curvature.ts) places each unit box directly from these attributes:
+//   transformed = position * vec3(voxel, yScale, voxel) + centre
+// so there is no per-voxel matrix/colour loop on the main thread anymore.
 
 import { WORLD_SCALE_Y } from './proj';
 
 export interface MeshBuffers {
-  positions: Float32Array; // count * 3 (voxel centres, world space)
-  colors: Uint32Array; // count, packed 0xAARRGGBB (AO in top byte)
-  yScales: Float32Array; // count, world-unit Y extent of each box
+  // count * 4: (centreX, centreY, -centreZ, yScale). Z is negated HERE (north-up);
+  // the shader un-negates it (`-worldPos.z`) before the mercator math.
+  iCenterScale: Float32Array;
+  // count * 4: sRGB r, g, b (0..255) + baked-AO byte in alpha (255 = open). Emitted
+  // as explicit bytes (not a packed u32) so the GPU attribute is endianness-free.
+  iColor: Uint8Array;
   count: number;
 }
 
@@ -127,9 +135,8 @@ export function buildCell(
   palette: PaletteId,
 ): MeshBuffers {
   const count = cellCols * cellCols;
-  const positions = new Float32Array(count * 3);
-  const colors = new Uint32Array(count);
-  const yScales = new Float32Array(count);
+  const iCenterScale = new Float32Array(count * 4);
+  const iColor = new Uint8Array(count * 4);
   const invY = 1 / WORLD_SCALE_Y;
   const stops = PALETTES[palette] ?? PALETTES[DEFAULT_PALETTE];
 
@@ -172,13 +179,18 @@ export function buildCell(
       }
       const ao = Math.max(0, Math.min(1, 1 - (AO_STRENGTH * occ) / (voxelSize * RING.length)));
 
-      positions[k * 3] = minX + (ci + 0.5) * voxelSize;
-      positions[k * 3 + 1] = (base + topY) * 0.5;
-      positions[k * 3 + 2] = minZ + (cj + 0.5) * voxelSize;
-      yScales[k] = topY - base;
-      colors[k] = (((ao * 255) | 0) * 0x1000000 + ramp(heightsM[idx], stops)) >>> 0;
+      const o = k * 4;
+      iCenterScale[o] = minX + (ci + 0.5) * voxelSize;
+      iCenterScale[o + 1] = (base + topY) * 0.5;
+      iCenterScale[o + 2] = -(minZ + (cj + 0.5) * voxelSize); // negate Z → north up
+      iCenterScale[o + 3] = topY - base; // yScale (world-unit box height)
+      const rgb = ramp(heightsM[idx], stops);
+      iColor[o] = (rgb >> 16) & 0xff;
+      iColor[o + 1] = (rgb >> 8) & 0xff;
+      iColor[o + 2] = rgb & 0xff;
+      iColor[o + 3] = (ao * 255) | 0; // baked AO → alpha
       k++;
     }
   }
-  return { positions, colors, yScales, count };
+  return { iCenterScale, iColor, count };
 }
