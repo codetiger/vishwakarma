@@ -178,9 +178,10 @@ export const mapTheme: MapTheme = {
     // Tuning knob: 12–16 trades draw calls for per-cell voxels (validate FPS +
     // renderer.info.render.calls on target hardware).
     lodLevels: 6, // overwritten at load from the manifest zoom span (App.tsx)
-    lodBandCells: 6, // finest-disk radius in cells. Trimmed 8→6 alongside cellCols
-    // 8→12 so the fine disk's world radius (∝ cellCols·lodBandCells) stays ~steady
-    // while the fine-disk draw-call count (∝ lodBandCells²) drops ~45%.
+    lodBandCells: 12, // finest-disk radius in cells: the finest LOD covers ~the central
+    // third+ of the view. Affordable because the view-frustum cull (TileField) now loads
+    // only on-screen cells, so widening the on-screen finest band doesn't also pay for
+    // the off-screen hemisphere. Fine-disk draw calls grow ∝ lodBandCells².
     lodBias: 2, // detail appears ~2 octaves (≈67% zoom) earlier; 3 ≈ the 50% zoom midpoint but ~4× heavier
     cameraHeight: 30, // near reference distance + pan-speed base
     minAltitude: 5, // closest the eye flies above ground → LOD shows the finest level (L0=0)

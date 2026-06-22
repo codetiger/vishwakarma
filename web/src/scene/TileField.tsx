@@ -2,7 +2,7 @@ import { useRef } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
 import * as THREE from 'three';
 import { mapTheme } from '../mapTheme';
-import { applyVoxelShader } from './curvature';
+import { applyVoxelShader, curveUniforms } from './curvature';
 import { GLOBE_R, flatToECEF, visibleCapBounds, type CapBounds } from './globe';
 import { cameraControls } from './cameraControls';
 import type { FromWorker, ToWorker, TileResult } from '../voxelTypes';
@@ -54,6 +54,13 @@ const BACK_MARGIN = 40; // world units behind the focus kept before culling
 // Render slightly past the spherical horizon so the silhouette fills without a hard
 // cull edge in the sky (used both for the per-cell cull and the root-scan cap).
 const HORIZON_MARGIN = 0.06; // radians rendered past the horizon (limb terrain)
+// View-frustum cull (so off-screen cells aren't requested/drawn): a cell's bounding
+// sphere = cell·FRUSTUM_PAD (lateral half-extent ≥ the ~0.71 half-diagonal, plus a
+// little preload slop) + the radial reach of exaggerated terrain. MAX_TERRAIN_WORLD is
+// ETOPO's ±~10.7 km / WORLD_SCALE_Y (≈1.45), rounded up — a constant is fine for an
+// Earth globe.
+const FRUSTUM_PAD = 0.9;
+const MAX_TERRAIN_WORLD = 1.6;
 
 interface Node {
   level: number;
@@ -144,6 +151,9 @@ export default function TileField({ voxelSize, focus, bounds, workers, inbox }: 
   const cullDir = useRef(new THREE.Vector3()); // scratch: cell sphere direction
   const viewFwd = useRef(new THREE.Vector3()); // scratch: camera forward (ECEF)
   const capB = useRef<CapBounds>({ xC: 0, xHalf: 0, zMin: 0, zMax: 0 }); // scratch: visible cap bbox
+  const frustum = useRef(new THREE.Frustum()); // scratch: ECEF view frustum (off-screen cull)
+  const projScratch = useRef(new THREE.Matrix4()); // scratch: projection × view matrix
+  const cellSphere = useRef(new THREE.Sphere()); // scratch: cell bounding sphere (ECEF)
   // Previous-density meshes held on screen during a density change, until the new
   // grid fully covers the view and we swap atomically (no drop to the coarse base).
   const retired = useRef<THREE.Mesh[]>([]);
@@ -235,6 +245,14 @@ export default function TileField({ voxelSize, focus, bounds, workers, inbox }: 
     // of pruning the visible part of the subtree.
     const capAngle = Math.acos(THREE.MathUtils.clamp(GLOBE_R / de, -1, 1));
     camera.getWorldDirection(viewFwd.current);
+    // Build the world-space (ECEF) view frustum for off-screen culling. RoamControls
+    // set the camera pose this frame, but matrixWorldInverse is otherwise only rebuilt
+    // at render (a frame later), so refresh it now. heightReach = the radial extent of
+    // exaggerated terrain, added to each cell's cull sphere below.
+    camera.updateMatrixWorld();
+    projScratch.current.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+    frustum.current.setFromProjectionMatrix(projScratch.current);
+    const heightReach = MAX_TERRAIN_WORLD * curveUniforms.uHeightScale.value;
     // Altitude above the globe surface beneath the focus (published by RoamControls).
     // This DRIVES the LOD: L0 = the finest level shown anywhere. Descend → L0 drops →
     // the whole visible field sharpens uniformly. minAltitude calibrates L0=0 (finest)
@@ -310,7 +328,15 @@ export default function TileField({ voxelSize, focus, bounds, workers, inbox }: 
       const behind =
         px * viewFwd.current.x + py * viewFwd.current.y + pz * viewFwd.current.z <
         -(BACK_MARGIN + cell);
-      n.culled = facing < horizonThresh || behind;
+      // Off-screen cull: the cell's projected (globe) bounding sphere vs the view
+      // frustum, so cells outside the FOV aren't requested/voxelized/drawn. cullDir is
+      // the unit cell-centre direction → ×GLOBE_R is its surface point. A big cell
+      // straddling the frustum edge still intersects, so it recurses (children get the
+      // tighter test). The coarse fallback covers any momentary edge gap while panning.
+      cellSphere.current.center.copy(cullDir.current).multiplyScalar(GLOBE_R);
+      cellSphere.current.radius = cell * FRUSTUM_PAD + heightReach;
+      const offscreen = !frustum.current.intersectsSphere(cellSphere.current);
+      n.culled = facing < horizonThresh || behind || offscreen;
       if (n.culled) {
         n.shouldSplit = false;
         return;
