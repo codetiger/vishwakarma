@@ -8,12 +8,10 @@ import RoamControls from './RoamControls';
 import TileField from './TileField';
 import PolarCaps from './PolarCaps';
 import PostFx from './PostFx';
-import type { PaletteId } from '../voxel/buildMesh';
 import type { TileResult } from '../voxelTypes';
 
 interface Props {
   voxelSize: number;
-  palette: PaletteId;
   focus: React.MutableRefObject<THREE.Vector3>;
   bounds: [number, number, number, number];
   workers: Worker[];
@@ -23,7 +21,7 @@ interface Props {
 // Owns the <Canvas>. The camera orbits the globe; RoamControls drives near/far per
 // frame to span surface-roam → whole-globe, so this far is only the initial value
 // (large enough to see across the globe before the first frame updates it).
-export default function Stage({ voxelSize, palette, focus, bounds, workers, inbox }: Props) {
+export default function Stage({ voxelSize, focus, bounds, workers, inbox }: Props) {
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 760;
   const far = 4 * GLOBE_R;
   return (
@@ -40,7 +38,7 @@ export default function Stage({ voxelSize, palette, focus, bounds, workers, inbo
       <Skydome />
       <LightingRig />
       <RoamControls focus={focus} bounds={bounds} />
-      <TileField voxelSize={voxelSize} palette={palette} focus={focus} bounds={bounds} workers={workers} inbox={inbox} />
+      <TileField voxelSize={voxelSize} focus={focus} bounds={bounds} workers={workers} inbox={inbox} />
       <PolarCaps />
       <PostFx enabled={!isMobile} voxelSize={voxelSize} />
     </Canvas>

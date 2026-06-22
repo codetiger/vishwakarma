@@ -1,32 +1,31 @@
-// Turn a grid of height samples (metres) into instance buffers for one LOD cell.
-// Pure TS (runs in the worker). Per column: one box whose top face is seated on
-// the exact terrain height and whose bottom drops to the lowest 4-neighbour, so
-// the wall between a column and a lower neighbour is filled (no see-through gaps),
-// with a one-voxel floor so flat ground still shows cubes.
+// Decode a grid of height samples (metres) for one LOD cell into a GPU-ready data
+// texture. Pure TS (runs in the worker). The cube geometry is then built ENTIRELY
+// ON THE GPU from this texture (web/src/scene/curvature.ts's vertex shader): each of
+// the cellCols² instances reads its column + 4 neighbours from the texture and
+// seats a box on the terrain, drops the wall to the lowest neighbour (one-voxel
+// floor), and drapes the perimeter LOD skirt — all in GLSL.
 //
-//  • LOD skirt — cell-perimeter columns drape further down (by the local relief,
-//    min two voxels) so the gap to a coarser-LOD neighbour is covered. The droop
-//    is hidden behind terrain everywhere except at a level transition, where it
-//    seals the crack. Skirt depth can't be baked into the tile (it depends on the
-//    neighbour's runtime LOD), so it lives here.
+//  • Texture layout — `side×side` RG float (side = cellCols + 2·AO_R): R = height in
+//    metres for the WHOLE padded grid (so the shader can read each interior column's
+//    neighbours), G = baked AO for the interior (drawn) columns.
 //  • Baked AO — per-voxel openness from the height ring (radius AO_R): surrounding
-//    higher terrain darkens (valley floors, cliff bases), ridges stay bright. Carried
-//    in the colour's alpha byte; the vertex shader folds it in (uAoFloor).
+//    higher terrain darkens (valley floors, cliff bases), ridges stay bright. Baked
+//    HERE (the ring is a 24-tap neighbourhood — cheaper once per tile than per
+//    vertex) into the G channel; the shader folds in uAoFloor.
+//  • Colour — a hypsometric ramp LUT (buildRampLUT) sampled by height in the shader,
+//    so a palette change is a free uniform swap (NO re-voxelize). The ramp is the
+//    single source of palette truth; voxelization is palette-independent now.
 //
-// Output is GPU-ready per-instance data — no main-thread rebuild. The vertex shader
-// (curvature.ts) places each unit box directly from these attributes:
-//   transformed = position * vec3(voxel, yScale, voxel) + centre
-// so there is no per-voxel matrix/colour loop on the main thread anymore.
+// SYNC: the column/skirt geometry lives ONLY in curvature.ts's GLSL now (not here).
+// If the AO ring or the height encoding changes, change both together. (Like the
+// encode.py↔heightTile.ts and globe.ts↔curvature.ts pairs the project already keeps.)
 
 import { WORLD_SCALE_Y } from './proj';
 
-export interface MeshBuffers {
-  // count * 4: (centreX, centreY, -centreZ, yScale). Z is negated HERE (north-up);
-  // the shader un-negates it (`-worldPos.z`) before the mercator math.
-  iCenterScale: Float32Array;
-  // count * 4: sRGB r, g, b (0..255) + baked-AO byte in alpha (255 = open). Emitted
-  // as explicit bytes (not a packed u32) so the GPU attribute is endianness-free.
-  iColor: Uint8Array;
+export interface CellTexture {
+  // side*side*2 interleaved RG: R = height (metres), G = baked AO (interior columns).
+  texData: Float32Array;
+  // cellCols² — the number of box instances the GPU draws for this cell.
   count: number;
 }
 
@@ -114,9 +113,18 @@ function ramp(m: number, stops: Stops): number {
 
 export const AO_R = 2; // openness ring radius, in columns (needs apron ≥ AO_R)
 const AO_STRENGTH = 1.7;
-const SKIRT_MIN = 2; // perimeter skirt floor, in voxels
-const SKIRT_RELIEF = 4; // skirt grows this × the local relief
-const SKIRT_MAX = 32; // skirt cap, in voxels
+// Perimeter LOD-skirt params (in voxels / × relief). The skirt is APPLIED in the
+// vertex shader now (curvature.ts) — these are exported so the shader can inject
+// them as GLSL consts, keeping the single source of truth here.
+export const SKIRT_MIN = 2; // perimeter skirt floor, in voxels
+export const SKIRT_RELIEF = 4; // skirt grows this × the local relief
+export const SKIRT_MAX = 32; // skirt cap, in voxels
+
+// Hypsometric LUT domain (metres). Covers ETOPO's range with margin; buildRampLUT
+// samples the ramp across [LUT_MIN_M, LUT_MAX_M] and the shader maps a sampled
+// height into [0,1] over the same span. Exported so curvature.ts injects them.
+export const LUT_MIN_M = -11000;
+export const LUT_MAX_M = 9000;
 
 // Precomputed AO ring offsets with 1/distance weights (distance in columns).
 const RING: [number, number, number][] = [];
@@ -124,73 +132,51 @@ for (let dj = -AO_R; dj <= AO_R; dj++)
   for (let di = -AO_R; di <= AO_R; di++)
     if (di || dj) RING.push([di, dj, 1 / Math.hypot(di, dj)]);
 
-export function buildCell(
+// Bake a palette's hypsometric ramp into a 256-entry RGBA LUT (sRGB bytes). The
+// shader samples this by normalized height; swapping the LUT recolours instantly.
+export function buildRampLUT(palette: PaletteId): Uint8Array {
+  const stops = PALETTES[palette] ?? PALETTES[DEFAULT_PALETTE];
+  const span = LUT_MAX_M - LUT_MIN_M;
+  const lut = new Uint8Array(256 * 4);
+  for (let i = 0; i < 256; i++) {
+    const rgb = ramp(LUT_MIN_M + (i / 255) * span, stops);
+    lut[i * 4] = (rgb >> 16) & 0xff;
+    lut[i * 4 + 1] = (rgb >> 8) & 0xff;
+    lut[i * 4 + 2] = rgb & 0xff;
+    lut[i * 4 + 3] = 255;
+  }
+  return lut;
+}
+
+export function buildCellTexture(
   heightsM: Float32Array,
   side: number,
   apron: number,
   cellCols: number,
   voxelSize: number,
-  minX: number,
-  minZ: number,
-  palette: PaletteId,
-): MeshBuffers {
+): CellTexture {
   const count = cellCols * cellCols;
-  const iCenterScale = new Float32Array(count * 4);
-  const iColor = new Uint8Array(count * 4);
+  const texData = new Float32Array(side * side * 2);
   const invY = 1 / WORLD_SCALE_Y;
-  const stops = PALETTES[palette] ?? PALETTES[DEFAULT_PALETTE];
 
-  // World-Y height for the whole padded grid (reused by walls, skirt, and AO).
-  const H = new Float32Array(side * side);
-  for (let i = 0; i < H.length; i++) H[i] = heightsM[i] * invY;
+  // R channel: height in metres for every texel (incl. the apron ring — the shader
+  // reads each interior column's 4 neighbours for the wall + skirt). G defaults 0.
+  for (let i = 0; i < side * side; i++) texData[i * 2] = heightsM[i];
 
-  let k = 0;
+  // G channel: baked AO for the interior (drawn) columns — the elevation-angle
+  // tangent of higher ring neighbours, in world-Y. (Apron AO is never sampled.)
   for (let cj = 0; cj < cellCols; cj++) {
     for (let ci = 0; ci < cellCols; ci++) {
-      const r = cj + apron;
-      const c = ci + apron;
-      const idx = r * side + c;
-      const topY = H[idx];
-
-      const nL = H[idx - 1];
-      const nR = H[idx + 1];
-      const nD = H[idx - side];
-      const nU = H[idx + side];
-      const minN = Math.min(nL, nR, nD, nU);
-      const maxN = Math.max(nL, nR, nD, nU);
-      let base = Math.min(minN, topY - voxelSize); // ≥ one voxel tall
-
-      // LOD skirt on the cell perimeter (sized by local relief, clamped).
-      if (ci === 0 || ci === cellCols - 1 || cj === 0 || cj === cellCols - 1) {
-        const relief = Math.max(topY - minN, maxN - topY);
-        const skirt = Math.min(
-          Math.max(SKIRT_MIN * voxelSize, SKIRT_RELIEF * relief),
-          SKIRT_MAX * voxelSize,
-        );
-        base = Math.min(base, topY - skirt);
-      }
-
-      // Baked AO: sum the elevation-angle tangent of higher ring neighbours.
+      const idx = (cj + apron) * side + (ci + apron);
+      const topY = heightsM[idx] * invY;
       let occ = 0;
       for (let t = 0; t < RING.length; t++) {
         const [di, dj, w] = RING[t];
-        const rise = H[idx + dj * side + di] - topY;
+        const rise = heightsM[idx + dj * side + di] * invY - topY;
         if (rise > 0) occ += rise * w;
       }
-      const ao = Math.max(0, Math.min(1, 1 - (AO_STRENGTH * occ) / (voxelSize * RING.length)));
-
-      const o = k * 4;
-      iCenterScale[o] = minX + (ci + 0.5) * voxelSize;
-      iCenterScale[o + 1] = (base + topY) * 0.5;
-      iCenterScale[o + 2] = -(minZ + (cj + 0.5) * voxelSize); // negate Z → north up
-      iCenterScale[o + 3] = topY - base; // yScale (world-unit box height)
-      const rgb = ramp(heightsM[idx], stops);
-      iColor[o] = (rgb >> 16) & 0xff;
-      iColor[o + 1] = (rgb >> 8) & 0xff;
-      iColor[o + 2] = rgb & 0xff;
-      iColor[o + 3] = (ao * 255) | 0; // baked AO → alpha
-      k++;
+      texData[idx * 2 + 1] = Math.max(0, Math.min(1, 1 - (AO_STRENGTH * occ) / (voxelSize * RING.length)));
     }
   }
-  return { iCenterScale, iColor, count };
+  return { texData, count };
 }

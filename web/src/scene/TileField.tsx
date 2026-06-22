@@ -1,11 +1,10 @@
-import { useMemo, useRef } from 'react';
+import { useRef } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
 import * as THREE from 'three';
 import { mapTheme } from '../mapTheme';
-import { applyWorldCurvature, curveUniforms } from './curvature';
+import { applyVoxelShader } from './curvature';
 import { GLOBE_R, flatToECEF, visibleCapBounds, type CapBounds } from './globe';
 import { cameraControls } from './cameraControls';
-import type { PaletteId } from '../voxel/buildMesh';
 import type { FromWorker, ToWorker, TileResult } from '../voxelTypes';
 
 // Quadtree LOD. The view is a quadtree of square cells centred on the camera:
@@ -15,7 +14,8 @@ import type { FromWorker, ToWorker, TileResult } from '../voxelTypes';
 // atomically. So exactly ONE resolution ever renders for a given patch — no
 // double-density overlap — and there is always a coarser fallback underneath, so
 // nothing blinks to void while finer detail streams in. Each cell is its own
-// InstancedMesh; visibility is toggled (not disposed) so swaps are instant.
+// instanced box mesh fed by a per-cell height texture (the GPU builds + colours the
+// voxels — see curvature.ts); visibility is toggled (not disposed) so swaps are instant.
 //
 // Cell world size scales with the voxel size (cell = cellCols × voxel), keeping
 // per-cell cost constant; that ties the grid to the selected size, so changing
@@ -28,6 +28,14 @@ import type { FromWorker, ToWorker, TileResult } from '../voxelTypes';
 type TileMsg = Extract<FromWorker, { type: 'tile' }>;
 
 const UNIT = new THREE.BoxGeometry(1, 1, 1);
+// One shared instance-id attribute (0 .. cellCols²-1), reused by every cell — so the
+// only per-cell GPU resource is the height texture. It also gives three an instanced
+// attribute, so it draws cellCols² instances. cellCols is constant, so this is built
+// once and shared by reference (detached, not freed, in disposeCell).
+const CELL_COLS = mapTheme.view.cellCols;
+const IDS = new Float32Array(CELL_COLS * CELL_COLS);
+for (let i = 0; i < IDS.length; i++) IDS[i] = i;
+const ID_ATTR = new THREE.InstancedBufferAttribute(IDS, 1);
 const WORKER_DEPTH = 2; // outstanding tiles per pool worker (1 running + 1 queued, so none idle)
 // Quadtree depth is mapTheme.view.lodLevels — set at load from the manifest's zoom
 // span so the clipmap always has exactly enough levels to bridge the finest voxel
@@ -60,87 +68,85 @@ interface Node {
   childrenCover: boolean;
 }
 
-// Wrap the worker's GPU-ready buffers in a per-cell InstancedBufferGeometry. The
-// vertex shader (curvature.ts, VOXEL_INSTANCING) places each unit box from the
-// per-instance attributes and folds in the baked AO + sRGB colour — so there is NO
-// per-voxel work on the main thread (no 16-float matrix, no setColorAt). A plain
-// Mesh + InstancedBufferGeometry still draws instanced (three checks
-// isInstancedBufferGeometry at draw time); we avoid InstancedMesh precisely so no
-// unused instanceMatrix is allocated/uploaded.
-function buildMesh(msg: TileMsg, material: THREE.Material): THREE.Mesh {
-  const { count, iCenterScale, iColor, voxelSize } = msg;
+// Build a cell as cellCols² unit-box instances driven by a per-cell height texture.
+// The vertex shader (curvature.ts) derives each box (position, height, skirt, colour)
+// from aId + the texture — no per-instance geometry on the CPU at all. The static box
+// attributes + the instance-id attribute are SHARED by reference; the DataTexture and
+// the small per-cell material (which carries this cell's minX/minZ/voxel + texture)
+// are the only per-cell GPU resources. A plain Mesh + InstancedBufferGeometry still
+// draws instanced (three checks isInstancedBufferGeometry at draw time).
+function buildMesh(msg: TileMsg, minX: number, minZ: number): THREE.Mesh {
+  const { count, side, texData, voxelSize } = msg;
+  // RG float: R = height (metres) for the whole padded grid, G = baked AO. Nearest —
+  // the shader reads exact texels (the column + its 4 neighbours).
+  const tex = new THREE.DataTexture(texData, side, side, THREE.RGFormat, THREE.FloatType);
+  tex.minFilter = THREE.NearestFilter;
+  tex.magFilter = THREE.NearestFilter;
+  tex.needsUpdate = true;
+  const mat = new THREE.MeshStandardMaterial({ roughness: 0.95, metalness: 0.0, flatShading: true });
+  applyVoxelShader(mat, {
+    uHeightTex: { value: tex },
+    uMinX: { value: minX },
+    uMinZ: { value: minZ },
+    uVoxel: { value: voxelSize },
+  });
   const g = new THREE.InstancedBufferGeometry();
-  // Share the unit box's static attributes by reference (24 verts, identical for
-  // every cell); only the small per-instance attributes are per-cell. disposeCell
-  // detaches these before dispose() so the shared buffers survive eviction.
   g.setIndex(UNIT.index);
   g.setAttribute('position', UNIT.getAttribute('position'));
   g.setAttribute('normal', UNIT.getAttribute('normal'));
   g.setAttribute('uv', UNIT.getAttribute('uv'));
+  g.setAttribute('aId', ID_ATTR);
   g.instanceCount = count;
-  // (centreX, centreY, -centreZ, yScale); the box X/Z extent (voxel size, constant
-  // per cell — one native .fill, not a per-voxel loop); and sRGB+AO as normalized
-  // bytes (rgb + AO in alpha).
-  g.setAttribute('aCenterScale', new THREE.InstancedBufferAttribute(iCenterScale, 4));
-  g.setAttribute('aVoxel', new THREE.InstancedBufferAttribute(new Float32Array(count).fill(voxelSize), 1));
-  g.setAttribute('aColor', new THREE.InstancedBufferAttribute(iColor, 4, true));
-  const mesh = new THREE.Mesh(g, material);
+  const mesh = new THREE.Mesh(g, mat);
   // Frustum culling OFF: the sphere projection (curvature.ts) moves vertices from
   // their flat position onto the globe in the vertex shader, but three's CPU cull
   // tests the undisplaced (flat) bounding sphere — so tiles whose flat position is
   // off-frustum but whose projected position is in view (the curved limb) would be
   // wrongly culled and pop. The quadtree already bounds the drawn set.
   mesh.frustumCulled = false;
+  mesh.userData.heightTex = tex;
   return mesh;
 }
 
-// Tear down a cell mesh: pull it from the scene and free its GPU buffers. The static
-// box attributes are SHARED (UNIT) across every cell, so detach them before
-// dispose() — three's dispose frees the GPU buffer of each attribute it still
-// holds, and deleting a shared one would yank a buffer other cells are drawing with.
+// Tear down a cell mesh: pull it from the scene and free its per-cell GPU resources
+// (the DataTexture + this cell's material). The static box attrs + the instance-id
+// attr are SHARED, so detach them before dispose() — three's geometry.dispose() frees
+// the GPU buffer of every attribute it still holds, and a shared one is in use by
+// other cells.
 function disposeCell(group: THREE.Group, mesh: THREE.Mesh): void {
   group.remove(mesh);
   const g = mesh.geometry;
   g.deleteAttribute('position');
   g.deleteAttribute('normal');
   g.deleteAttribute('uv');
+  g.deleteAttribute('aId');
   g.setIndex(null);
   g.dispose();
+  (mesh.material as THREE.Material).dispose();
+  (mesh.userData.heightTex as THREE.Texture | undefined)?.dispose();
 }
 
 interface Props {
   voxelSize: number; // finest (selected) size
-  palette: PaletteId; // hypsometric colour ramp (changing it re-voxelizes)
   focus: React.MutableRefObject<THREE.Vector3>; // shared LOD center = the eye (world)
   bounds: [number, number, number, number]; // [minX, minZ, maxX, maxZ]
   workers: Worker[];
   inbox: React.MutableRefObject<TileResult[]>;
 }
 
-export default function TileField({ voxelSize, palette, focus, bounds, workers, inbox }: Props) {
+export default function TileField({ voxelSize, focus, bounds, workers, inbox }: Props) {
   const camera = useThree((s) => s.camera);
   const groupRef = useRef<THREE.Group>(null);
   const nodes = useRef(new Map<string, Node>());
   const inflight = useRef<number[]>([]); // outstanding tiles per pool worker
   const reqId = useRef(0);
   const lastS = useRef(0);
-  const lastPalette = useRef(palette);
   const cullDir = useRef(new THREE.Vector3()); // scratch: cell sphere direction
   const viewFwd = useRef(new THREE.Vector3()); // scratch: camera forward (ECEF)
   const capB = useRef<CapBounds>({ xC: 0, xHalf: 0, zMin: 0, zMax: 0 }); // scratch: visible cap bbox
   // Previous-density meshes held on screen during a density change, until the new
   // grid fully covers the view and we swap atomically (no drop to the coarse base).
   const retired = useRef<THREE.Mesh[]>([]);
-
-  const material = useMemo(() => {
-    const mat = new THREE.MeshStandardMaterial({ roughness: 0.95, metalness: 0.0, flatShading: true });
-    // Enable the per-instance box transform + colour fold in the projection shader
-    // (merge — don't clobber the STANDARD define the material sets in its ctor).
-    mat.defines = { ...(mat.defines ?? {}), VOXEL_INSTANCING: '' };
-    curveUniforms.uAoFloor.value = mapTheme.post.aoFloor; // baked-AO floor → live uniform
-    applyWorldCurvature(mat);
-    return mat;
-  }, []);
 
   useFrame(() => {
     const group = groupRef.current;
@@ -156,14 +162,14 @@ export default function TileField({ voxelSize, palette, focus, bounds, workers, 
       inflight.current = new Array(workers.length).fill(0);
     }
 
-    // Voxel size OR palette changed ⇒ every cell must be rebuilt: a size change
-    // moves the cell grid (cell = cellCols·voxel) so the old nodes don't map onto
-    // the new grid; a palette change re-colours every voxel at build time. Either
-    // way, instead of wiping the screen, RETIRE the currently-visible meshes: keep
-    // them rendered as a frozen fallback while the new grid streams in behind them
-    // (hidden), then swap atomically once it covers the view (below) — never a
-    // coarse flash, and never the old colours flickering against the new.
-    if (s !== lastS.current || palette !== lastPalette.current) {
+    // Voxel size changed ⇒ every cell must be rebuilt: a size change moves the cell
+    // grid (cell = cellCols·voxel) so the old nodes don't map onto the new grid.
+    // Instead of wiping the screen, RETIRE the currently-visible meshes: keep them
+    // rendered as a frozen fallback while the new grid streams in behind them
+    // (hidden), then swap atomically once it covers the view (below) — never a coarse
+    // flash. (Palette no longer comes through here — colour is a shader-LUT uniform
+    // swap now, so the live cells recolour in place with no re-voxelize.)
+    if (s !== lastS.current) {
       const midSwap = retired.current.length > 0; // a previous change is still streaming
       for (const n of map.values()) {
         if (!n.mesh) continue;
@@ -180,7 +186,6 @@ export default function TileField({ voxelSize, palette, focus, bounds, workers, 
       inflight.current.fill(0);
       inbox.current.length = 0;
       lastS.current = s;
-      lastPalette.current = palette;
     }
 
     const C0 = cellCols * s; // level-0 cell world size
@@ -204,9 +209,9 @@ export default function TileField({ voxelSize, palette, focus, bounds, workers, 
         if (!n) continue; // evicted
         n.requested = false;
         if (n.voxel !== msg.voxelSize) continue; // stale density
-        if (msg.palette !== palette) continue; // stale palette (size unchanged)
         if (n.mesh) disposeCell(group, n.mesh);
-        n.mesh = buildMesh(msg, material);
+        const cell = cellAt(n.level);
+        n.mesh = buildMesh(msg, n.ix * cell, n.iz * cell);
         n.mesh.visible = false; // visibility decided below
         group.add(n.mesh);
       }
@@ -375,7 +380,6 @@ export default function TileField({ voxelSize, palette, focus, bounds, workers, 
         maxX: (n.ix + 1) * cell,
         maxZ: (n.iz + 1) * cell,
         voxelSize: n.voxel,
-        palette,
       } satisfies ToWorker);
     }
 

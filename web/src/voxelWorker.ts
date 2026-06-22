@@ -1,5 +1,5 @@
 /// <reference lib="webworker" />
-import { AO_R, buildCell } from './voxel/buildMesh';
+import { AO_R, buildCellTexture } from './voxel/buildMesh';
 import { TileStore } from './voxel/heightTile';
 import { makeProj, type Manifest, type Proj } from './voxel/proj';
 import type { FromWorker, ToWorker } from './voxelTypes';
@@ -40,7 +40,7 @@ self.onmessage = async (e: MessageEvent<ToWorker>) => {
   if (msg.type === 'voxelizeTile') {
     if (!proj || !store) return;
     try {
-      const { minX, minZ, maxX, maxZ, voxelSize, palette } = msg;
+      const { minX, minZ, maxX, maxZ, voxelSize } = msg;
       const z = proj.voxelToZoom(voxelSize);
       const cellCols = Math.max(1, Math.round((maxX - minX) / voxelSize));
       const side = cellCols + 2 * APRON;
@@ -61,19 +61,18 @@ self.onmessage = async (e: MessageEvent<ToWorker>) => {
         }
       }
 
-      const mesh = buildCell(heights, side, APRON, cellCols, voxelSize, minX, minZ, palette);
+      const cell = buildCellTexture(heights, side, APRON, cellCols, voxelSize);
       post(
         {
           type: 'tile',
           id: msg.id,
           key: msg.key,
           voxelSize,
-          palette,
-          count: mesh.count,
-          iCenterScale: mesh.iCenterScale,
-          iColor: mesh.iColor,
+          count: cell.count,
+          side,
+          texData: cell.texData,
         },
-        [mesh.iCenterScale.buffer, mesh.iColor.buffer],
+        [cell.texData.buffer],
       );
     } catch (err) {
       post({ type: 'error', id: msg.id, message: String(err) });

@@ -1,56 +1,120 @@
 import * as THREE from 'three';
-import { E, WORLD_SCALE_XZ } from '../voxel/proj';
+import { E, WORLD_SCALE_XZ, WORLD_SCALE_Y } from '../voxel/proj';
 import { GLOBE_R } from './globe';
+import { mapTheme } from '../mapTheme';
+import { AO_R, SKIRT_MIN, SKIRT_RELIEF, SKIRT_MAX, LUT_MIN_M, LUT_MAX_M } from '../voxel/buildMesh';
 
-// Spherical projection — the real "round world". A vertex shader maps every
-// ground vertex from the FLAT Web-Mercator world onto a globe of radius GLOBE_R:
-// flat (X,Z) → lon/lat (inverse mercator) → unit sphere direction, and the
-// height axis Y maps to the RADIAL axis (r = R + height), so a vertical voxel
-// column becomes a correct radial voxel. This MIRRORS globe.ts's `flatToECEF`
-// (same constants, same lon/lat math); keep the two in sync. The camera
-// (RoamControls) places itself with globe.ts so eye and ground share one space.
+// Spherical projection + GPU voxelization — the real "round world". Each LOD cell is
+// drawn as cellCols² unit-box instances; this vertex shader builds every box AND
+// places it on a globe of radius GLOBE_R:
+//   1. From the instance id (aId) it derives the cell column (ci, cj), reads that
+//      column's height + 4 neighbours + baked AO from the cell's RG height texture
+//      (uHeightTex), seats the box on the terrain, drops the wall to the lowest
+//      neighbour (one-voxel floor), and drapes the perimeter LOD skirt — the cube
+//      geometry buildMesh.ts used to compute on the CPU, now on the GPU.
+//   2. flat (X,Z) → lon/lat (inverse mercator) → unit sphere direction; height →
+//      radial axis (r = R + height). This MIRRORS globe.ts's flatToECEF (same
+//      constants + lon/lat math) and the column/skirt math mirrors buildMesh.ts's
+//      former buildCell — keep them in sync (run globe.ts's selfTest after changes).
 //
-// Every scene material that touches the ground must run this projection, or it
-// detaches from the globe. All projected materials SHARE the uniform objects
-// below, so a single per-frame write of uHeightScale re-exaggerates the whole
-// scene at once. The flat clipmap (TileField) and voxelizer stay flat — the GPU
-// does the bend. NOTE: the instance Z is negated at placement (TileField), so the
-// shader un-negates it (`-worldPos.z`) before the mercator math; globe.ts works
-// in true world Z directly. Keep that pairing.
+// Colour is a hypsometric ramp LUT (uRampLUT) sampled by height — so a palette change
+// is a single shared-uniform swap, NO re-voxelize. uHeightScale + uAoFloor are shared
+// singletons too; one write re-exaggerates / re-floors every cell at once. Per-cell
+// data (height texture + minX/minZ/voxel) lives on each cell's own material
+// (TileField), read here from `this.userData.cell` so all cells share ONE program.
+// NOTE: Z is negated at placement (czNeg) and un-negated (`-worldPos.z`) before the
+// mercator math, matching globe.ts (which works in true world Z).
 
 export const curveUniforms = {
-  // Vertical exaggeration: each ground vertex's height (world Y) is scaled before
-  // it becomes the radial offset, so the UI height-scale control re-exaggerates
-  // all terrain instantly with no re-voxelization. Keep terrain.ts's heightScale
-  // in sync (set both together) so the camera follows the exaggerated surface.
+  // Vertical exaggeration (UI height-scale). Keep terrain.ts's heightScale in sync
+  // (set both together) so the camera follows the exaggerated surface.
   uHeightScale: { value: 1 },
-  // Baked-AO floor (= mapTheme.post.aoFloor; 1 ⇒ AO off). The per-voxel AO byte is
-  // folded into the instance colour in the vertex shader, so this is a live uniform
-  // (no re-voxelize). TileField sets it from the theme. Shared singleton like
-  // uHeightScale — one write re-floors every projected material at once.
+  // Baked-AO floor (= mapTheme.post.aoFloor; 1 ⇒ AO off).
   uAoFloor: { value: 1 },
+  // Hypsometric ramp LUT (256×1, sRGB). Swapped on palette change → instant recolour
+  // with no worker round-trip. App owns it.
+  uRampLUT: { value: null as THREE.Texture | null },
 };
 
-// Constants injected so the GLSL matches globe.ts exactly. WS_OVER_E folds the
-// big mercator subtraction into a small multiply for float precision:
+// --- injected GLSL ---------------------------------------------------------------
+
+// Format a JS number as a GLSL float literal (integers need a trailing `.0`).
+const glf = (x: number): string => {
+  const s = String(x);
+  return /[.eE]/.test(s) ? s : `${s}.0`;
+};
+
+const CELL_COLS = mapTheme.view.cellCols; // voxels per cell edge (= instances per cell edge)
+const APRON = AO_R; // texture border ring (so edge columns can read neighbours)
+const TEX_SIDE = CELL_COLS + 2 * APRON; // height-texture edge in texels
+// WS_OVER_E folds the big mercator subtraction into a small multiply for precision:
 //   lon = (X·WORLD_SCALE_XZ − E)/E·π = (X·WS_OVER_E − 1)·π
 const WS_OVER_E = WORLD_SCALE_XZ / E;
+const INV_WORLD_Y = 1 / WORLD_SCALE_Y; // metres (texture) → world-Y
+const LUT_RANGE = LUT_MAX_M - LUT_MIN_M;
 
-// Replaces #include <project_vertex>. When VOXEL_INSTANCING is defined (the voxel
-// clipmap material), the unit box is placed from the per-instance attributes FIRST
-// — this is what the old per-voxel instanceMatrix did, now built on the GPU — then
-// the unchanged sphere projection runs on the placed flat position. `transformed`
-// is reassigned (begin_vertex already declared it); `mvPosition` ends as the
-// view-space position, so the later `vViewPosition = -mvPosition.xyz` (flat-shading
-// normals) stays correct. Non-instanced ground materials skip the box step and
-// project `position` directly.
-const SPHERE_VERTEX = /* glsl */ `
-  #ifdef VOXEL_INSTANCING
-    transformed = transformed * vec3( aVoxel, aCenterScale.w, aVoxel ) + aCenterScale.xyz;
-    // Fold baked AO in sRGB space (matches the old setColorAt path), then linearize.
-    float aoF = uAoFloor + ( 1.0 - uAoFloor ) * aColor.a;
-    vBaseColor = srgbToLinear( aColor.rgb * aoF );
-  #endif
+const VOXEL_HEADER = /* glsl */ `
+uniform float uHeightScale;
+uniform float uAoFloor;
+uniform float uMinX;
+uniform float uMinZ;
+uniform float uVoxel;
+uniform sampler2D uHeightTex;
+uniform sampler2D uRampLUT;
+attribute float aId;          // instance index 0 .. cellCols²-1
+varying vec3 vBaseColor;
+#define PI 3.141592653589793
+#define HALF_PI 1.5707963267948966
+const int CELL_COLS = ${CELL_COLS};
+const int APRON = ${APRON};
+const int TEX_SIDE = ${TEX_SIDE};
+const float WS_OVER_E = ${glf(WS_OVER_E)};
+const float GLOBE_R = ${glf(GLOBE_R)};
+const float INV_WORLD_Y = ${glf(INV_WORLD_Y)};
+const float LUT_MIN = ${glf(LUT_MIN_M)};
+const float LUT_RANGE = ${glf(LUT_RANGE)};
+const float SKIRT_MIN = ${glf(SKIRT_MIN)};
+const float SKIRT_RELIEF = ${glf(SKIRT_RELIEF)};
+const float SKIRT_MAX = ${glf(SKIRT_MAX)};
+vec3 srgbToLinear( vec3 c ) {
+  return mix( pow( ( c + 0.055 ) / 1.055, vec3( 2.4 ) ), c / 12.92, step( c, vec3( 0.04045 ) ) );
+}
+`;
+
+// Replaces #include <project_vertex>: build the box from the height texture, then
+// project it onto the globe. `transformed` is reassigned (begin_vertex declared it);
+// `mvPosition` ends as the view-space position so the later `vViewPosition =
+// -mvPosition.xyz` (flat-shading normals) stays correct.
+const VOXEL_VERTEX = /* glsl */ `
+  int id = int( aId + 0.5 );
+  int ci = id - ( id / CELL_COLS ) * CELL_COLS;   // id % CELL_COLS
+  int cj = id / CELL_COLS;
+  float texel = 1.0 / float( TEX_SIDE );
+  vec2 uv = ( vec2( float( ci + APRON ), float( cj + APRON ) ) + 0.5 ) * texel;
+  float hM = textureLod( uHeightTex, uv, 0.0 ).r;
+  float hL = textureLod( uHeightTex, uv + vec2( -texel, 0.0 ), 0.0 ).r;
+  float hR = textureLod( uHeightTex, uv + vec2(  texel, 0.0 ), 0.0 ).r;
+  float hD = textureLod( uHeightTex, uv + vec2( 0.0, -texel ), 0.0 ).r;
+  float hU = textureLod( uHeightTex, uv + vec2( 0.0,  texel ), 0.0 ).r;
+  float ao = textureLod( uHeightTex, uv, 0.0 ).g;
+  float topY = hM * INV_WORLD_Y;
+  float minN = min( min( hL, hR ), min( hD, hU ) ) * INV_WORLD_Y;
+  float maxN = max( max( hL, hR ), max( hD, hU ) ) * INV_WORLD_Y;
+  float base = min( minN, topY - uVoxel );          // ≥ one voxel tall
+  if ( ci == 0 || ci == CELL_COLS - 1 || cj == 0 || cj == CELL_COLS - 1 ) {
+    float relief = max( topY - minN, maxN - topY ); // perimeter LOD skirt
+    base = min( base, topY - clamp( SKIRT_RELIEF * relief, SKIRT_MIN * uVoxel, SKIRT_MAX * uVoxel ) );
+  }
+  float yScale = topY - base;
+  float cx = uMinX + ( float( ci ) + 0.5 ) * uVoxel;
+  float cy = ( base + topY ) * 0.5;
+  float czNeg = -( uMinZ + ( float( cj ) + 0.5 ) * uVoxel );   // negate Z → north up
+  transformed = position * vec3( uVoxel, yScale, uVoxel ) + vec3( cx, cy, czNeg );
+  // Colour from the ramp LUT (sampled by height); fold AO in sRGB then linearize.
+  float lutCoord = clamp( ( hM - LUT_MIN ) / LUT_RANGE, 0.0, 1.0 );
+  vec3 rgb = textureLod( uRampLUT, vec2( lutCoord, 0.5 ), 0.0 ).rgb;
+  vBaseColor = srgbToLinear( rgb * ( uAoFloor + ( 1.0 - uAoFloor ) * ao ) );
+
   vec4 mvPosition = vec4( transformed, 1.0 );
   vec4 worldPos = modelMatrix * mvPosition;        // flat world (X, Y, -Z)
   float lon = ( worldPos.x * WS_OVER_E - 1.0 ) * PI;
@@ -63,50 +127,51 @@ const SPHERE_VERTEX = /* glsl */ `
   gl_Position = projectionMatrix * mvPosition;
 `;
 
-const SPHERE_HEADER = /* glsl */ `
-uniform float uHeightScale;
-uniform float uAoFloor;
-#define PI 3.141592653589793
-#define HALF_PI 1.5707963267948966
-const float WS_OVER_E = ${WS_OVER_E};
-const float GLOBE_R = ${GLOBE_R};
-#ifdef VOXEL_INSTANCING
-  attribute vec4 aCenterScale;   // (centreX, centreY, -centreZ, yScale)
-  attribute float aVoxel;        // box X/Z extent (cell voxel size)
-  attribute vec4 aColor;         // sRGB rgb + baked AO (alpha), normalized 0..1
-  varying vec3 vBaseColor;       // constant per instance → no interpolation needed
-  vec3 srgbToLinear( vec3 c ) {
-    return mix( pow( ( c + 0.055 ) / 1.055, vec3( 2.4 ) ), c / 12.92, step( c, vec3( 0.04045 ) ) );
-  }
-#endif
-`;
-
-// Carries the folded instance colour to the fragment stage; multiplied into the
-// diffuse there (replaces the old instanceColor path).
+// Carries the LUT colour (× AO) to the fragment stage; multiplied into the diffuse.
 const FRAG_HEADER = /* glsl */ `
-#ifdef VOXEL_INSTANCING
-  varying vec3 vBaseColor;
-#endif
+varying vec3 vBaseColor;
 `;
 
-// Name kept for the existing call site in TileField; it now installs the sphere
-// projection (no curvature arg). The voxel material additionally sets
-// material.defines.VOXEL_INSTANCING to enable the per-instance box transform +
-// colour fold above.
-export function applyWorldCurvature(material: THREE.Material): void {
-  material.onBeforeCompile = (shader) => {
-    // Assign the SHARED uniform objects (not copies): one per-frame write to
-    // uHeightScale / uAoFloor updates this material along with every projected one.
-    shader.uniforms.uHeightScale = curveUniforms.uHeightScale;
-    shader.uniforms.uAoFloor = curveUniforms.uAoFloor;
-    shader.vertexShader = `${SPHERE_HEADER}\n${shader.vertexShader}`.replace(
-      '#include <project_vertex>',
-      SPHERE_VERTEX,
-    );
-    shader.fragmentShader = `${FRAG_HEADER}\n${shader.fragmentShader}`.replace(
-      '#include <color_fragment>',
-      '#include <color_fragment>\n  #ifdef VOXEL_INSTANCING\n  diffuseColor.rgb *= vBaseColor;\n  #endif',
-    );
-  };
+// Per-cell uniforms: the cell's height texture + its world placement. Held on the
+// material's userData and read by the shared onBeforeCompile below.
+export interface CellUniforms {
+  uHeightTex: { value: THREE.Texture | null };
+  uMinX: { value: number };
+  uMinZ: { value: number };
+  uVoxel: { value: number };
+}
+
+// Shared across every cell material (same function reference + a constant cache key
+// ⇒ ONE compiled program for all cells). It reads this cell's per-cell uniforms from
+// `this.userData.cell` and the shared singletons from curveUniforms.
+function voxelOnBeforeCompile(
+  this: THREE.Material,
+  shader: THREE.WebGLProgramParametersWithUniforms,
+): void {
+  const cell = (this.userData as { cell: CellUniforms }).cell;
+  shader.uniforms.uHeightTex = cell.uHeightTex;
+  shader.uniforms.uMinX = cell.uMinX;
+  shader.uniforms.uMinZ = cell.uMinZ;
+  shader.uniforms.uVoxel = cell.uVoxel;
+  shader.uniforms.uHeightScale = curveUniforms.uHeightScale;
+  shader.uniforms.uAoFloor = curveUniforms.uAoFloor;
+  shader.uniforms.uRampLUT = curveUniforms.uRampLUT;
+  shader.vertexShader = `${VOXEL_HEADER}\n${shader.vertexShader}`.replace(
+    '#include <project_vertex>',
+    VOXEL_VERTEX,
+  );
+  shader.fragmentShader = `${FRAG_HEADER}\n${shader.fragmentShader}`.replace(
+    '#include <color_fragment>',
+    '#include <color_fragment>\n  diffuseColor.rgb *= vBaseColor;',
+  );
+}
+
+// Install the GPU voxelizer + sphere projection on a cell's material. `cell` carries
+// the cell's height texture + world placement. customProgramCacheKey is a constant so
+// every cell shares one program despite differing per-cell uniform values.
+export function applyVoxelShader(material: THREE.Material, cell: CellUniforms): void {
+  material.userData.cell = cell;
+  material.onBeforeCompile = voxelOnBeforeCompile;
+  material.customProgramCacheKey = () => 'voxel-tex';
   material.needsUpdate = true;
 }

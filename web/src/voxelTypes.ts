@@ -6,8 +6,6 @@
 // explicitly; the worker just voxelizes that rectangle. `key` routes the result
 // back to its cell.
 
-import type { PaletteId } from './voxel/buildMesh';
-
 export type ToWorker =
   | { type: 'load'; url: string }
   | {
@@ -19,7 +17,6 @@ export type ToWorker =
       maxX: number;
       maxZ: number;
       voxelSize: number;
-      palette: PaletteId;
     };
 
 export type FromWorker =
@@ -29,16 +26,15 @@ export type FromWorker =
       id: number;
       key: string;
       voxelSize: number;
-      /** Echoed back so the tile manager can drop results built with a superseded
-       *  palette (mirrors the `voxelSize` staleness check). */
-      palette: PaletteId;
+      /** cellCols² — number of box instances the GPU draws for this cell. */
       count: number;
-      /** GPU-ready per-instance data (no main-thread rebuild). Wrapped directly in
-       *  InstancedBufferAttributes by TileField. count*4: (centreX, centreY,
-       *  -centreZ, yScale) — Z negated for north-up; yScale is the box height. */
-      iCenterScale: Float32Array;
-      /** count*4 bytes: sRGB r,g,b + baked-AO in alpha (normalized in the shader). */
-      iColor: Uint8Array;
+      /** Texture edge in texels (cellCols + 2·AO_R). */
+      side: number;
+      /** side*side*2 interleaved RG float: R = height (metres) for the whole padded
+       *  grid, G = baked AO for the interior columns. The vertex shader builds every
+       *  box from this (no per-instance geometry). Voxelization is palette-independent
+       *  now — colour is a ramp-LUT swap in the shader. */
+      texData: Float32Array;
     }
   | { type: 'error'; id?: number; message: string };
 

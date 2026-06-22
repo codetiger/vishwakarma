@@ -1,11 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import Stage from "./scene/Stage";
 import { mapTheme } from "./mapTheme";
 import { initTerrain, setHeightScale } from "./terrain";
 import { curveUniforms } from "./scene/curvature";
 import { cameraControls } from "./scene/cameraControls";
-import { DEFAULT_PALETTE, PALETTES, type PaletteId } from "./voxel/buildMesh";
+import { DEFAULT_PALETTE, PALETTES, buildRampLUT, type PaletteId } from "./voxel/buildMesh";
 import type { FromWorker, ToWorker, TileResult } from "./voxelTypes";
 
 // Terrain colour palettes offered in the panel dropdown. The ids must match the
@@ -33,6 +33,20 @@ type PaletteStops = (typeof PALETTES)[PaletteId];
 const PALETTE_GRADIENTS = Object.fromEntries(
   PALETTE_OPTIONS.map((p) => [p.id, paletteGradient(PALETTES[p.id])]),
 ) as Record<PaletteId, string>;
+
+// A palette baked into a 256×1 hypsometric LUT the voxel shader samples by height.
+// Linear-filtered so the colour ramp stays continuous, like the old per-voxel lerp.
+// Built once per palette; switching palettes just points uRampLUT at another texture
+// (no re-voxelize), since voxelization is now palette-independent.
+function makeLUT(id: PaletteId): THREE.DataTexture {
+  const tex = new THREE.DataTexture(buildRampLUT(id), 256, 1, THREE.RGBAFormat);
+  tex.minFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.wrapS = THREE.ClampToEdgeWrapping;
+  tex.wrapT = THREE.ClampToEdgeWrapping;
+  tex.needsUpdate = true;
+  return tex;
+}
 
 // Extra LOD octaves ABOVE the pyramid's coarsest level. The clipmap's pyramid-
 // coarse cell (~56 world units) would need thousands of cells to tile the whole
@@ -132,10 +146,24 @@ export default function App() {
     null,
   );
   const [heightExag, setHeightExag] = useState(1);
-  // Selected hypsometric colour ramp. Changing it re-voxelizes (TileField swaps
-  // the new colouring in atomically, no flash); the streamed colour is baked per
-  // voxel in the worker, so there's no cheaper main-thread recolour.
+  // Selected hypsometric colour ramp. Changing it is now a FREE shader-uniform swap
+  // (the LUT below) — no re-voxelize, no worker round-trip — because colour is sampled
+  // per-fragment from the LUT, not baked into the tiles.
   const [palette, setPalette] = useState<PaletteId>(DEFAULT_PALETTE);
+
+  // One LUT texture per palette, built once. Point the shared shader uniform at the
+  // selected one (and set the baked-AO floor) — every voxel cell recolours instantly.
+  const luts = useMemo(() => {
+    const m = Object.fromEntries(
+      PALETTE_OPTIONS.map((p) => [p.id, makeLUT(p.id)]),
+    ) as Record<PaletteId, THREE.DataTexture>;
+    curveUniforms.uAoFloor.value = mapTheme.post.aoFloor;
+    curveUniforms.uRampLUT.value = m[DEFAULT_PALETTE];
+    return m;
+  }, []);
+  useEffect(() => {
+    curveUniforms.uRampLUT.value = luts[palette];
+  }, [palette, luts]);
 
   // Attribution popover (next to the GitHub icon) and the palette dropdown — both
   // anchored menus that dismiss on outside-click / Escape.
@@ -230,7 +258,6 @@ export default function App() {
       {status === "ready" && bounds && workersRef.current.length > 0 && (
         <Stage
           voxelSize={voxelSize}
-          palette={palette}
           focus={focus}
           bounds={bounds}
           workers={workersRef.current}
