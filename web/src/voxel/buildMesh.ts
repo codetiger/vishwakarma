@@ -30,10 +30,10 @@ export interface CellTexture {
 }
 
 // Elevation (m) → sRGB hypsometric ramps. Each palette is a list of stops
-// `[elevationM, r, g, b]` ascending by elevation; `ramp` lerps between them (sea
-// below 0 m, land above). To add a palette: add a stop list here AND its id to
-// `PaletteId` and the App dropdown. Colour lives in the voxelizer — not in the
-// tile, not in mapTheme.
+// `[elevationM, r, g, b]` ascending by elevation; the shader's `rampColor` (curvature.ts)
+// lerps between them (sea below 0 m, land above). To add a palette: add a stop list here
+// AND its id to `PaletteId` and the App dropdown. Colour is evaluated per-vertex in the
+// shader from these stops (so voxelization is palette-independent) — not in the tile.
 export type PaletteId = 'atlas' | 'terrain' | 'grayscale' | 'viridis' | 'inferno';
 
 type Stops = [number, number, number, number][];
@@ -92,23 +92,27 @@ export const PALETTES: Record<PaletteId, Stops> = {
 
 export const DEFAULT_PALETTE: PaletteId = 'atlas';
 
-function ramp(m: number, stops: Stops): number {
-  let lo = stops[0];
-  let hi = stops[stops.length - 1];
-  if (m <= lo[0]) hi = lo;
-  else if (m >= hi[0]) lo = hi;
-  else
-    for (let i = 1; i < stops.length; i++)
-      if (m <= stops[i][0]) {
-        lo = stops[i - 1];
-        hi = stops[i];
-        break;
-      }
-  const t = hi[0] === lo[0] ? 0 : (m - lo[0]) / (hi[0] - lo[0]);
-  const r = (lo[1] + (hi[1] - lo[1]) * t) | 0;
-  const g = (lo[2] + (hi[2] - lo[2]) * t) | 0;
-  const b = (lo[3] + (hi[3] - lo[3]) * t) | 0;
-  return (r << 16) | (g << 8) | b;
+// Max palette stops (atlas has the most, 10). The shader's uStops uniform array is sized
+// to this; paletteStops pads to it.
+export const MAX_STOPS = 10;
+
+// Flatten a palette into the shader's stop uniform: one vec4 per stop
+// (elevationM, r, g, b) with rgb in 0..1 sRGB, ascending by elevation, padded to
+// MAX_STOPS. The shader's rampColor evaluates these exactly (no LUT quantization), and
+// App swaps them on palette change for an instant, re-voxelize-free recolour. `count` is
+// the real number of stops.
+export function paletteStops(palette: PaletteId): { data: Float32Array; count: number } {
+  const stops = PALETTES[palette] ?? PALETTES[DEFAULT_PALETTE];
+  const n = Math.min(stops.length, MAX_STOPS);
+  const data = new Float32Array(MAX_STOPS * 4);
+  for (let i = 0; i < n; i++) {
+    const [m, r, g, b] = stops[i];
+    data[i * 4] = m;
+    data[i * 4 + 1] = r / 255;
+    data[i * 4 + 2] = g / 255;
+    data[i * 4 + 3] = b / 255;
+  }
+  return { data, count: n };
 }
 
 export const AO_R = 2; // openness ring radius, in columns (needs apron ≥ AO_R)
@@ -120,33 +124,11 @@ export const SKIRT_MIN = 2; // perimeter skirt floor, in voxels
 export const SKIRT_RELIEF = 4; // skirt grows this × the local relief
 export const SKIRT_MAX = 32; // skirt cap, in voxels
 
-// Hypsometric LUT domain (metres). Covers ETOPO's range with margin; buildRampLUT
-// samples the ramp across [LUT_MIN_M, LUT_MAX_M] and the shader maps a sampled
-// height into [0,1] over the same span. Exported so curvature.ts injects them.
-export const LUT_MIN_M = -11000;
-export const LUT_MAX_M = 9000;
-
 // Precomputed AO ring offsets with 1/distance weights (distance in columns).
 const RING: [number, number, number][] = [];
 for (let dj = -AO_R; dj <= AO_R; dj++)
   for (let di = -AO_R; di <= AO_R; di++)
     if (di || dj) RING.push([di, dj, 1 / Math.hypot(di, dj)]);
-
-// Bake a palette's hypsometric ramp into a 256-entry RGBA LUT (sRGB bytes). The
-// shader samples this by normalized height; swapping the LUT recolours instantly.
-export function buildRampLUT(palette: PaletteId): Uint8Array {
-  const stops = PALETTES[palette] ?? PALETTES[DEFAULT_PALETTE];
-  const span = LUT_MAX_M - LUT_MIN_M;
-  const lut = new Uint8Array(256 * 4);
-  for (let i = 0; i < 256; i++) {
-    const rgb = ramp(LUT_MIN_M + (i / 255) * span, stops);
-    lut[i * 4] = (rgb >> 16) & 0xff;
-    lut[i * 4 + 1] = (rgb >> 8) & 0xff;
-    lut[i * 4 + 2] = rgb & 0xff;
-    lut[i * 4 + 3] = 255;
-  }
-  return lut;
-}
 
 export function buildCellTexture(
   heightsM: Float32Array,

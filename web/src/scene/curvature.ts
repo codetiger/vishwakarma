@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { E, WORLD_SCALE_XZ, WORLD_SCALE_Y } from '../voxel/proj';
 import { GLOBE_R } from './globe';
 import { mapTheme } from '../mapTheme';
-import { AO_R, SKIRT_MIN, SKIRT_RELIEF, SKIRT_MAX, LUT_MIN_M, LUT_MAX_M } from '../voxel/buildMesh';
+import { AO_R, SKIRT_MIN, SKIRT_RELIEF, SKIRT_MAX, MAX_STOPS } from '../voxel/buildMesh';
 
 // Spherical projection + GPU voxelization — the real "round world". Each LOD cell is
 // drawn as cellCols² unit-box instances; this vertex shader builds every box AND
@@ -31,9 +31,12 @@ export const curveUniforms = {
   uHeightScale: { value: 1 },
   // Baked-AO floor (= mapTheme.post.aoFloor; 1 ⇒ AO off).
   uAoFloor: { value: 1 },
-  // Hypsometric ramp LUT (256×1, sRGB). Swapped on palette change → instant recolour
-  // with no worker round-trip. App owns it.
-  uRampLUT: { value: null as THREE.Texture | null },
+  // Hypsometric ramp as palette stops (vec4[MAX_STOPS] = elevationM, r, g, b in 0..1
+  // sRGB) + the active count. The shader evaluates the ramp EXACTLY per vertex (no LUT
+  // quantization), so 0 m land is precisely the sea-level stop colour. App swaps these
+  // on palette change → instant recolour, no worker round-trip.
+  uStops: { value: new Float32Array(MAX_STOPS * 4) as Float32Array },
+  uStopCount: { value: 0 },
 };
 
 // --- injected GLSL ---------------------------------------------------------------
@@ -51,7 +54,6 @@ const TEX_SIDE = CELL_COLS + 2 * APRON; // height-texture edge in texels
 //   lon = (X·WORLD_SCALE_XZ − E)/E·π = (X·WS_OVER_E − 1)·π
 const WS_OVER_E = WORLD_SCALE_XZ / E;
 const INV_WORLD_Y = 1 / WORLD_SCALE_Y; // metres (texture) → world-Y
-const LUT_RANGE = LUT_MAX_M - LUT_MIN_M;
 
 const VOXEL_HEADER = /* glsl */ `
 uniform float uHeightScale;
@@ -60,7 +62,9 @@ uniform float uMinX;
 uniform float uMinZ;
 uniform float uVoxel;
 uniform sampler2D uHeightTex;
-uniform sampler2D uRampLUT;
+#define MAX_STOPS ${MAX_STOPS}
+uniform int uStopCount;
+uniform vec4 uStops[MAX_STOPS];   // (elevationM, r, g, b) ascending; rgb 0..1 sRGB
 attribute float aId;          // instance index 0 .. cellCols²-1
 varying vec3 vBaseColor;
 #define PI 3.141592653589793
@@ -71,13 +75,25 @@ const int TEX_SIDE = ${TEX_SIDE};
 const float WS_OVER_E = ${glf(WS_OVER_E)};
 const float GLOBE_R = ${glf(GLOBE_R)};
 const float INV_WORLD_Y = ${glf(INV_WORLD_Y)};
-const float LUT_MIN = ${glf(LUT_MIN_M)};
-const float LUT_RANGE = ${glf(LUT_RANGE)};
 const float SKIRT_MIN = ${glf(SKIRT_MIN)};
 const float SKIRT_RELIEF = ${glf(SKIRT_RELIEF)};
 const float SKIRT_MAX = ${glf(SKIRT_MAX)};
 vec3 srgbToLinear( vec3 c ) {
   return mix( pow( ( c + 0.055 ) / 1.055, vec3( 2.4 ) ), c / 12.92, step( c, vec3( 0.04045 ) ) );
+}
+// Exact hypsometric ramp (mirrors buildMesh.ts ramp()): clamp below the first stop,
+// lerp between the bracketing stops, clamp above the last. No texture quantization.
+vec3 rampColor( float m ) {
+  if ( m <= uStops[0].x ) return uStops[0].yzw;
+  for ( int i = 1; i < MAX_STOPS; i++ ) {
+    if ( i >= uStopCount ) break;
+    if ( m <= uStops[i].x ) {
+      float lo = uStops[i - 1].x;
+      float t = uStops[i].x > lo ? ( m - lo ) / ( uStops[i].x - lo ) : 0.0;
+      return mix( uStops[i - 1].yzw, uStops[i].yzw, t );
+    }
+  }
+  return uStops[uStopCount - 1].yzw;
 }
 `;
 
@@ -110,9 +126,9 @@ const VOXEL_VERTEX = /* glsl */ `
   float cy = ( base + topY ) * 0.5;
   float czNeg = -( uMinZ + ( float( cj ) + 0.5 ) * uVoxel );   // negate Z → north up
   transformed = position * vec3( uVoxel, yScale, uVoxel ) + vec3( cx, cy, czNeg );
-  // Colour from the ramp LUT (sampled by height); fold AO in sRGB then linearize.
-  float lutCoord = clamp( ( hM - LUT_MIN ) / LUT_RANGE, 0.0, 1.0 );
-  vec3 rgb = textureLod( uRampLUT, vec2( lutCoord, 0.5 ), 0.0 ).rgb;
+  // Colour from the exact hypsometric ramp (by height in metres); fold AO in sRGB then
+  // linearize. Matches the former per-voxel ramp — no LUT quantization, crisp coastline.
+  vec3 rgb = rampColor( hM );
   vBaseColor = srgbToLinear( rgb * ( uAoFloor + ( 1.0 - uAoFloor ) * ao ) );
 
   vec4 mvPosition = vec4( transformed, 1.0 );
@@ -155,7 +171,8 @@ function voxelOnBeforeCompile(
   shader.uniforms.uVoxel = cell.uVoxel;
   shader.uniforms.uHeightScale = curveUniforms.uHeightScale;
   shader.uniforms.uAoFloor = curveUniforms.uAoFloor;
-  shader.uniforms.uRampLUT = curveUniforms.uRampLUT;
+  shader.uniforms.uStops = curveUniforms.uStops;
+  shader.uniforms.uStopCount = curveUniforms.uStopCount;
   shader.vertexShader = `${VOXEL_HEADER}\n${shader.vertexShader}`.replace(
     '#include <project_vertex>',
     VOXEL_VERTEX,
