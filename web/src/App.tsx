@@ -5,6 +5,7 @@ import { mapTheme } from "./mapTheme";
 import { initTerrain, setHeightScale } from "./terrain";
 import { curveUniforms } from "./scene/curvature";
 import { cameraControls } from "./scene/cameraControls";
+import { debug } from "./scene/debug";
 import { DEFAULT_PALETTE, PALETTES, paletteStops, type PaletteId } from "./voxel/buildMesh";
 import type { FromWorker, ToWorker, TileResult } from "./voxelTypes";
 
@@ -153,6 +154,51 @@ export default function App() {
     curveUniforms.uStopCount.value = count;
   }, [palette]);
 
+  // Hidden debug overlay (toggle with the backtick key): reads the live camera pose
+  // (to reproduce an exact view) + flips render debug flags. wireframe/levelTint are
+  // mirrored to the debug singleton (TileField/shader read them); noAO/noPost thread to
+  // PostFx as props so the composer re-renders.
+  const [dbgOpen, setDbgOpen] = useState(false);
+  const [dbgFlags, setDbgFlags] = useState({
+    wireframe: false,
+    levelTint: false,
+    noAO: false,
+    noPost: false,
+  });
+  const [hud, setHud] = useState({ pitchDeg: 90, headingDeg: 0, distR: 0, altitude: 0, lon: 0, lat: 0, L0: 0, cells: 0 });
+  useEffect(() => {
+    debug.wireframe = dbgFlags.wireframe;
+    debug.levelTint = dbgFlags.levelTint;
+    debug.noAO = dbgFlags.noAO;
+    debug.noPost = dbgFlags.noPost;
+  }, [dbgFlags]);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "`" || e.key === "~") setDbgOpen((v) => !v);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+  useEffect(() => {
+    if (!dbgOpen) return;
+    let raf = 0;
+    const tick = () => {
+      setHud({
+        pitchDeg: debug.pitchDeg,
+        headingDeg: debug.headingDeg,
+        distR: debug.distR,
+        altitude: debug.altitude,
+        lon: debug.lon,
+        lat: debug.lat,
+        L0: debug.L0,
+        cells: debug.cells,
+      });
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [dbgOpen]);
+
   // Attribution popover (next to the GitHub icon) and the palette dropdown — both
   // anchored menus that dismiss on outside-click / Escape.
   const [showInfo, setShowInfo] = useState(false);
@@ -250,7 +296,25 @@ export default function App() {
           bounds={bounds}
           workers={workersRef.current}
           inbox={inbox}
+          noAO={dbgFlags.noAO}
+          noPost={dbgFlags.noPost}
         />
+      )}
+
+      {dbgOpen && (
+        <div className="debug-hud">
+          <div className="dbg-title">debug · ` to hide</div>
+          <div className="dbg-row"><span>pitch</span><b>{hud.pitchDeg.toFixed(1)}° {hud.pitchDeg > 85 ? "(top-down)" : ""}</b></div>
+          <div className="dbg-row"><span>heading</span><b>{hud.headingDeg.toFixed(1)}°</b></div>
+          <div className="dbg-row"><span>dist</span><b>{hud.distR.toFixed(2)}×R</b></div>
+          <div className="dbg-row"><span>altitude</span><b>{hud.altitude.toFixed(1)}</b></div>
+          <div className="dbg-row"><span>lat, lon</span><b>{hud.lat.toFixed(2)}, {hud.lon.toFixed(2)}</b></div>
+          <div className="dbg-row"><span>L0 / cells</span><b>{hud.L0} / {hud.cells}</b></div>
+          <label className="dbg-chk"><input type="checkbox" checked={dbgFlags.wireframe} onChange={(e) => setDbgFlags((f) => ({ ...f, wireframe: e.target.checked }))} /> wireframe</label>
+          <label className="dbg-chk"><input type="checkbox" checked={dbgFlags.levelTint} onChange={(e) => setDbgFlags((f) => ({ ...f, levelTint: e.target.checked }))} /> LOD-level tint</label>
+          <label className="dbg-chk"><input type="checkbox" checked={dbgFlags.noAO} onChange={(e) => setDbgFlags((f) => ({ ...f, noAO: e.target.checked }))} /> disable AO</label>
+          <label className="dbg-chk"><input type="checkbox" checked={dbgFlags.noPost} onChange={(e) => setDbgFlags((f) => ({ ...f, noPost: e.target.checked }))} /> disable post FX</label>
+        </div>
       )}
 
       <div className="panel">

@@ -10,8 +10,10 @@ import {
   ecefToFlat,
   enuBasis,
   lonLatToWorld,
+  worldToLonLat,
   type ENU,
 } from "./globe";
+import { debug } from "./debug";
 
 // Geospatial ORBIT camera (Google-Earth style). The camera lives in ECEF/sphere
 // space and orbits a FOCUS point on the globe (the geographic point at screen
@@ -456,6 +458,15 @@ export default function RoamControls({ focus, bounds }: Props) {
     // Publish for the LOD (radial altitude above the surface) and the compass.
     cameraControls.surfaceAltitude = Math.max(d * sinP, 0.001);
     cameraControls.heading = heading.current;
+
+    // Publish pose for the hidden debug overlay (so an exact view can be reproduced).
+    const [flon, flat] = worldToLonLat(fx, fz);
+    debug.pitchDeg = (pitchEff * 180) / Math.PI;
+    debug.headingDeg = ((((heading.current * 180) / Math.PI) % 360) + 360) % 360;
+    debug.distR = d / GLOBE_R;
+    debug.altitude = cameraControls.surfaceAltitude;
+    debug.lon = (flon * 180) / Math.PI;
+    debug.lat = (flat * 180) / Math.PI;
   });
 
   return null;

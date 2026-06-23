@@ -5,6 +5,7 @@ import { mapTheme } from '../mapTheme';
 import { applyVoxelShader, curveUniforms } from './curvature';
 import { GLOBE_R, flatToECEF, visibleCapBounds, type CapBounds } from './globe';
 import { cameraControls } from './cameraControls';
+import { debug } from './debug';
 import type { FromWorker, ToWorker, TileResult } from '../voxelTypes';
 
 // Quadtree LOD. The view is a quadtree of square cells centred on the camera:
@@ -82,7 +83,7 @@ interface Node {
 // the small per-cell material (which carries this cell's minX/minZ/voxel + texture)
 // are the only per-cell GPU resources. A plain Mesh + InstancedBufferGeometry still
 // draws instanced (three checks isInstancedBufferGeometry at draw time).
-function buildMesh(msg: TileMsg, minX: number, minZ: number): THREE.Mesh {
+function buildMesh(msg: TileMsg, minX: number, minZ: number, level: number): THREE.Mesh {
   const { count, side, texData, voxelSize } = msg;
   // RG float: R = height (metres) for the whole padded grid, G = baked AO. Nearest —
   // the shader reads exact texels (the column + its 4 neighbours).
@@ -90,12 +91,18 @@ function buildMesh(msg: TileMsg, minX: number, minZ: number): THREE.Mesh {
   tex.minFilter = THREE.NearestFilter;
   tex.magFilter = THREE.NearestFilter;
   tex.needsUpdate = true;
-  const mat = new THREE.MeshStandardMaterial({ roughness: 0.95, metalness: 0.0, flatShading: true });
+  const mat = new THREE.MeshStandardMaterial({
+    roughness: 0.95,
+    metalness: 0.0,
+    flatShading: true,
+    wireframe: debug.wireframe, // debug overlay
+  });
   applyVoxelShader(mat, {
     uHeightTex: { value: tex },
     uMinX: { value: minX },
     uMinZ: { value: minZ },
     uVoxel: { value: voxelSize },
+    uLevel: { value: level }, // debug LOD-level tint
   });
   const g = new THREE.InstancedBufferGeometry();
   g.setIndex(UNIT.index);
@@ -154,6 +161,7 @@ export default function TileField({ voxelSize, focus, bounds, workers, inbox }: 
   const frustum = useRef(new THREE.Frustum()); // scratch: ECEF view frustum (off-screen cull)
   const projScratch = useRef(new THREE.Matrix4()); // scratch: projection × view matrix
   const cellSphere = useRef(new THREE.Sphere()); // scratch: cell bounding sphere (ECEF)
+  const wireRef = useRef(debug.wireframe); // last applied debug wireframe flag
   // Previous-density meshes held on screen during a density change, until the new
   // grid fully covers the view and we swap atomically (no drop to the coarse base).
   const retired = useRef<THREE.Mesh[]>([]);
@@ -221,7 +229,7 @@ export default function TileField({ voxelSize, focus, bounds, workers, inbox }: 
         if (n.voxel !== msg.voxelSize) continue; // stale density
         if (n.mesh) disposeCell(group, n.mesh);
         const cell = cellAt(n.level);
-        n.mesh = buildMesh(msg, n.ix * cell, n.iz * cell);
+        n.mesh = buildMesh(msg, n.ix * cell, n.iz * cell, n.level);
         n.mesh.visible = false; // visibility decided below
         group.add(n.mesh);
       }
@@ -471,6 +479,20 @@ export default function TileField({ voxelSize, focus, bounds, workers, inbox }: 
       if (!n.visited) {
         if (n.mesh) disposeCell(group, n.mesh);
         map.delete(key);
+      }
+    }
+
+    // Debug overlay: publish LOD metrics + apply the live debug render flags.
+    debug.L0 = L0;
+    let vcells = 0;
+    for (const c of group.children) if (c.visible) vcells++;
+    debug.cells = vcells;
+    curveUniforms.uDebugTint.value = debug.levelTint ? 1 : 0;
+    if (wireRef.current !== debug.wireframe) {
+      wireRef.current = debug.wireframe;
+      for (const c of group.children) {
+        const m = (c as THREE.Mesh).material as THREE.MeshStandardMaterial | undefined;
+        if (m) m.wireframe = debug.wireframe;
       }
     }
   });

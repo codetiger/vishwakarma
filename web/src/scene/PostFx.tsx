@@ -19,8 +19,18 @@ import { mapTheme } from '../mapTheme';
 //   Vignette   — a cosmic vignette.
 const aoColor = new THREE.Color(mapTheme.post.ao.color);
 
-export default function PostFx({ enabled = true, voxelSize }: { enabled?: boolean; voxelSize: number }) {
-  if (!enabled || !mapTheme.post.enabled) return null;
+export default function PostFx({
+  enabled = true,
+  voxelSize,
+  noAO = false,
+  noPost = false,
+}: {
+  enabled?: boolean;
+  voxelSize: number;
+  noAO?: boolean; // debug: skip N8AO
+  noPost?: boolean; // debug: skip the whole post chain
+}) {
+  if (!enabled || !mapTheme.post.enabled || noPost) return null;
   const { ao } = mapTheme.post;
   // World-space AO radius tied to the rendered cube size: a few voxel edges, so
   // the occlusion sits in the creases between adjacent cube faces and scales with
@@ -31,7 +41,7 @@ export default function PostFx({ enabled = true, voxelSize }: { enabled?: boolea
       <N8AO
         aoRadius={aoRadius}
         distanceFalloff={ao.distanceFalloff}
-        intensity={ao.intensity}
+        intensity={noAO ? 0 : ao.intensity}
         halfRes={ao.halfRes}
         color={aoColor}
       />

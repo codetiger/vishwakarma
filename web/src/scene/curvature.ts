@@ -37,6 +37,9 @@ export const curveUniforms = {
   // on palette change → instant recolour, no worker round-trip.
   uStops: { value: new Float32Array(MAX_STOPS * 4) as Float32Array },
   uStopCount: { value: 0 },
+  // Debug: when >0.5, tint each cell by its LOD level (the debug.ts overlay sets it)
+  // so the clipmap's levels — and any overlap — are visible at a glance. Shared.
+  uDebugTint: { value: 0 },
 };
 
 // --- injected GLSL ---------------------------------------------------------------
@@ -61,6 +64,8 @@ uniform float uAoFloor;
 uniform float uMinX;
 uniform float uMinZ;
 uniform float uVoxel;
+uniform float uLevel;     // this cell's LOD level (debug tint)
+uniform float uDebugTint; // >0.5 ⇒ tint by level
 uniform sampler2D uHeightTex;
 #define MAX_STOPS ${MAX_STOPS}
 uniform int uStopCount;
@@ -130,6 +135,10 @@ const VOXEL_VERTEX = /* glsl */ `
   // linearize. Matches the former per-voxel ramp — no LUT quantization, crisp coastline.
   vec3 rgb = rampColor( hM );
   vBaseColor = srgbToLinear( rgb * ( uAoFloor + ( 1.0 - uAoFloor ) * ao ) );
+  if ( uDebugTint > 0.5 ) { // tint by LOD level (debug): each level a distinct hue
+    vec3 hue = 0.5 + 0.5 * cos( 6.2831853 * uLevel * 0.16 + vec3( 0.0, 2.094, 4.188 ) );
+    vBaseColor = mix( vBaseColor, hue, 0.6 );
+  }
 
   vec4 mvPosition = vec4( transformed, 1.0 );
   vec4 worldPos = modelMatrix * mvPosition;        // flat world (X, Y, -Z)
@@ -155,6 +164,7 @@ export interface CellUniforms {
   uMinX: { value: number };
   uMinZ: { value: number };
   uVoxel: { value: number };
+  uLevel: { value: number }; // LOD level (debug tint)
 }
 
 // Shared across every cell material (same function reference + a constant cache key
@@ -169,10 +179,12 @@ function voxelOnBeforeCompile(
   shader.uniforms.uMinX = cell.uMinX;
   shader.uniforms.uMinZ = cell.uMinZ;
   shader.uniforms.uVoxel = cell.uVoxel;
+  shader.uniforms.uLevel = cell.uLevel;
   shader.uniforms.uHeightScale = curveUniforms.uHeightScale;
   shader.uniforms.uAoFloor = curveUniforms.uAoFloor;
   shader.uniforms.uStops = curveUniforms.uStops;
   shader.uniforms.uStopCount = curveUniforms.uStopCount;
+  shader.uniforms.uDebugTint = curveUniforms.uDebugTint;
   shader.vertexShader = `${VOXEL_HEADER}\n${shader.vertexShader}`.replace(
     '#include <project_vertex>',
     VOXEL_VERTEX,
