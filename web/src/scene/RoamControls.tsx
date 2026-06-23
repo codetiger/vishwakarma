@@ -18,9 +18,10 @@ import { debug } from "./debug";
 // Geospatial ORBIT camera (Google-Earth style). The camera lives in ECEF/sphere
 // space and orbits a FOCUS point on the globe (the geographic point at screen
 // centre, kept in flat world XZ and published for the LOD clipmap). State is a
-// focus + an orbit DISTANCE (wheel) + a HEADING + a TILT (pitch). Near the surface
-// (small distance) it reads as the familiar oblique terrain roam; pulling back
-// straightens to top-down and frames the whole globe — one model, no mode switch.
+// focus + an orbit DISTANCE (wheel) + a HEADING + a TILT (pitch). The camera faces
+// straight down (nadir) by default and stays at whatever tilt the user dials — zoom
+// NEVER changes the tilt. At nadir the focus and the globe centre coincide on screen,
+// so the whole globe is centred; tilting reveals the horizon.
 // pitch = π/2 looks straight down (nadir); pitch → 0 looks at the horizon.
 //
 //   left-drag   : grab the surface and drag it (the grabbed point tracks the
@@ -30,8 +31,7 @@ import { debug } from "./debug";
 //                 rotates heading, vertical TILTS (drag down → near-horizon
 //                 "from the ground plane" view; drag up → top-down)
 //   wheel       : zoom (distance), biased toward the point under the cursor; no
-//                 zoom-out cap short of the whole globe. Zooming out straightens
-//                 the tilt to top-down, area centred (no swing over the hemisphere)
+//                 zoom-out cap short of the whole globe. Zoom does not change the tilt.
 //   right-drag  : rotate heading (north-up by default; the on-screen compass shows
 //                 heading and resets both heading and tilt)
 //   WASD        : pan the focus;  Q/E : rotate heading
@@ -49,11 +49,6 @@ const TILT_SPEED = mapTheme.view.tiltSpeed; // middle-drag vertical → tilt rad
 const D_MIN = minAltitude / Math.sin(PITCH_MAX); // closest orbit (steepest pitch → smallest D)
 const D_MAX = mapTheme.view.maxDistR * GLOBE_R; // whole globe + headroom (no region cap)
 const D_INIT = mapTheme.view.initialDistR * GLOBE_R; // opening framing
-// Straighten the tilt to top-down as you zoom out: below STRAIGHTEN_NEAR honour the
-// user's tilt (oblique roam), above STRAIGHTEN_FAR force nadir so the eye pulls
-// radially up over the area (top-down, area centred — no hemisphere swing).
-const STRAIGHTEN_NEAR = mapTheme.view.straightenNearR * GLOBE_R;
-const STRAIGHTEN_FAR = mapTheme.view.straightenFarR * GLOBE_R;
 
 const ZOOM_SPEED = 0.0012; // wheel delta → distance factor (log scale)
 const ROTATE_SPEED = 0.005; // drag pixel → heading radians
@@ -370,6 +365,15 @@ export default function RoamControls({ focus, bounds }: Props) {
       resetting.current = true;
       cameraControls._resetNorth = false;
     }
+    if (cameraControls._tiltStep !== 0) {
+      userPitch.current = THREE.MathUtils.clamp(
+        userPitch.current + cameraControls._tiltStep,
+        PITCH_MIN,
+        PITCH_MAX,
+      );
+      cameraControls._tiltStep = 0;
+      resetting.current = false; // a manual tilt cancels any reset ease
+    }
 
     // Keyboard pan/rotate (direct, no inertia).
     const k = keys.current;
@@ -406,11 +410,11 @@ export default function RoamControls({ focus, bounds }: Props) {
     const fz = focus.current.z;
     const groundH = terrainHeight(fx, fz);
 
-    // Effective tilt: honour the user's pitch up close, straighten toward nadir as
-    // we zoom out so the eye pulls radially up over the area (top-down, centred).
-    // PITCH_MAX (≈ nadir − ε) keeps cos(pitch) > 0 so camera.up never collapses.
-    const straightenT = THREE.MathUtils.smoothstep(dist.current, STRAIGHTEN_NEAR, STRAIGHTEN_FAR);
-    const pitchEff = THREE.MathUtils.lerp(userPitch.current, PITCH_MAX, straightenT);
+    // Effective tilt is purely the user's middle-drag pitch — zoom NEVER changes it.
+    // Defaults to PITCH_INIT (= nadir), so the camera faces straight down until the
+    // user tilts. userPitch is already clamped to [PITCH_MIN, PITCH_MAX]; PITCH_MAX
+    // (≈ nadir − ε) keeps cos(pitch) > 0 so camera.up never collapses.
+    const pitchEff = userPitch.current;
     const sinP = Math.sin(pitchEff);
     const cosP = Math.cos(pitchEff);
 
@@ -442,9 +446,9 @@ export default function RoamControls({ focus, bounds }: Props) {
     // Same as the old radial `up` at this pitch (lookAt projects to the same direction),
     // but it stays well-defined at nadir (cosP > 0) where the view nears the radial.
     camera.up.copy(up).multiplyScalar(cosP).addScaledVector(fwd.current, sinP);
-    // Always look at the surface focus, so the area stays centred on screen. Zoom-out
-    // top-down comes from the pitch straightening above (eye rises radially over S),
-    // not from sliding the target toward the globe centre (which swung the camera up).
+    // Always look at the surface focus, so the area stays centred on screen. The
+    // top-down framing comes from the default pitch (nadir), not from sliding the
+    // target toward the globe centre (which swung the camera up).
     camera.lookAt(S.current);
 
     // Per-frame depth range: see across the globe, keep precision over the huge
@@ -458,6 +462,7 @@ export default function RoamControls({ focus, bounds }: Props) {
     // Publish for the LOD (radial altitude above the surface) and the compass.
     cameraControls.surfaceAltitude = Math.max(d * sinP, 0.001);
     cameraControls.heading = heading.current;
+    cameraControls.pitch = userPitch.current;
 
     // Publish pose for the hidden debug overlay (so an exact view can be reproduced).
     const [flon, flat] = worldToLonLat(fx, fz);

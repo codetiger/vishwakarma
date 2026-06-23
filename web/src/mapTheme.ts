@@ -120,12 +120,6 @@ export interface MapTheme {
     initialDistR: number;
     /** Zoom-toward-cursor strength (0 = zoom to centre, 1 = snap focus to cursor). */
     cursorBias: number;
-    /** Straighten the tilt to top-down as you zoom out: below `straightenNearR·R`
-     *  the camera honours the user's tilt (oblique surface roam); above
-     *  `straightenFarR·R` the effective pitch is forced to nadir, so the eye pulls
-     *  radially up over the area (top-down, area centred). Smoothstep between them. */
-    straightenNearR: number;
-    straightenFarR: number;
   };
 }
 
@@ -169,14 +163,17 @@ export const mapTheme: MapTheme = {
   },
   view: {
     baseVoxel: 3.0,
-    cellCols: 12, // columns per tile. Bigger cells ⇒ fewer InstancedMesh draw calls
-    // (each covers ~(12/8)²≈2.25× the area), paid for by more voxels per cell — fine
-    // now that the GPU places every box from per-instance attributes (no main-thread
-    // per-voxel loop; see buildMesh.ts/curvature.ts). The fine-disk CELL count is
-    // ~π·lodBandCells² (independent of cellCols), so lodBandCells is trimmed below to
-    // keep the fine voxel budget + detail radius ~steady while draw calls drop.
-    // Tuning knob: 12–16 trades draw calls for per-cell voxels (validate FPS +
-    // renderer.info.render.calls on target hardware).
+    cellCols: 16, // columns per tile. MUST be a power of two: the clipmap grid is
+    // periodic on the globe (TileField wraps longitude), which requires each LOD level
+    // to divide the circumference into a whole number of cells — only a power-of-two
+    // cellCols makes colsAt(L) integral AND colsAt(L-1)=2·colsAt(L) (children tile
+    // parents seamlessly). Bigger cells ⇒ fewer InstancedMesh draw calls, paid for by
+    // more voxels per cell — fine now that the GPU places every box from per-instance
+    // attributes (no main-thread per-voxel loop; see buildMesh.ts/curvature.ts). The
+    // fine-disk CELL count is ~π·lodBandCells² (independent of cellCols), so lodBandCells
+    // is trimmed below to keep the fine voxel budget + detail radius ~steady while draw
+    // calls drop. Tuning knob: 8 or 16 (power of two) trades draw calls for per-cell
+    // voxels (validate FPS + renderer.info.render.calls on target hardware).
     lodLevels: 6, // overwritten at load from the manifest zoom span (App.tsx)
     lodBandCells: 12, // finest-disk radius in cells: the finest LOD covers ~the central
     // third+ of the view. Affordable because the view-frustum cull (TileField) now loads
@@ -185,7 +182,9 @@ export const mapTheme: MapTheme = {
     lodBias: 2, // detail appears ~2 octaves (≈67% zoom) earlier; 3 ≈ the 50% zoom midpoint but ~4× heavier
     cameraHeight: 30, // near reference distance + pan-speed base
     minAltitude: 5, // closest the eye flies above ground → LOD shows the finest level (L0=0)
-    pitch: 0.95, // ~54° down — opening/default tilt (user changes it with middle-drag)
+    pitch: 1.55, // top-down (nadir, = pitchMax) — opening/default tilt; the camera faces
+    // straight down by default and only tilts when the user middle-drags. Compass reset
+    // eases back here.
     pitchMin: 0.18, // ~10° above horizon — the "from the ground plane" tilt limit
     pitchMax: 1.55, // ≈ π/2 − 0.02 — nadir (top-down), kept off the up-vector singularity
     tiltSpeed: 0.006, // middle-drag: radians of tilt per pixel of vertical drag
@@ -193,7 +192,5 @@ export const mapTheme: MapTheme = {
     maxDistR: 6, // zoom out to 6× the globe radius (whole globe in the starfield)
     initialDistR: 3.2, // open framed on the globe (with starfield margin) so it's visible
     cursorBias: 0.5, // zoom toward the cursor (Google-Earth feel)
-    straightenNearR: 0.5, // below 0.5×R: honour the user's tilt (oblique roam)
-    straightenFarR: 2.2, // above 2.2×R: force nadir (top-down on the area, centred)
   },
 };

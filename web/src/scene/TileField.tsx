@@ -208,13 +208,23 @@ export default function TileField({ voxelSize, focus, bounds, workers, inbox }: 
 
     const C0 = cellCols * s; // level-0 cell world size
     const Lmax = Math.min(lodLevels - 1, Math.max(0, Math.round(Math.log2(Math.max(baseVoxel / s, 1)))));
-    const cellAt = (L: number) => C0 * 2 ** L;
+    // Periodic horizontal grid: each LOD level divides the globe's longitude span into
+    // an integer number of columns (colsAt), so a cell's X index wraps cleanly modulo
+    // that count. cellAt is derived as spanX/colsAt (EXACTLY periodic — column 0 and
+    // column colsAt land on the identical longitude with no drift) rather than C0·2^L,
+    // which need not divide spanX. This is what stops the same geographic column being
+    // drawn at two different LOD levels. cellCols is a power of two, so colsAt(L-1) =
+    // 2·colsAt(L) and children tile their parent seamlessly. Latitude (Z) is bounded —
+    // it does NOT wrap (the polar gap is filled by PolarCaps), so iz stays raw.
+    const colsAt = (L: number) => Math.max(1, Math.round(spanX / (C0 * 2 ** L)));
+    const cellAt = (L: number) => spanX / colsAt(L);
     const voxelAt = (L: number) => s * 2 ** L;
+    const wrapCol = (ix: number, L: number) => { const c = colsAt(L); return ((ix % c) + c) % c; };
     const childKeys = (L: number, ix: number, iz: number) => [
-      `${L - 1}_${2 * ix}_${2 * iz}`,
-      `${L - 1}_${2 * ix + 1}_${2 * iz}`,
-      `${L - 1}_${2 * ix}_${2 * iz + 1}`,
-      `${L - 1}_${2 * ix + 1}_${2 * iz + 1}`,
+      `${L - 1}_${wrapCol(2 * ix, L - 1)}_${2 * iz}`,
+      `${L - 1}_${wrapCol(2 * ix + 1, L - 1)}_${2 * iz}`,
+      `${L - 1}_${wrapCol(2 * ix, L - 1)}_${2 * iz + 1}`,
+      `${L - 1}_${wrapCol(2 * ix + 1, L - 1)}_${2 * iz + 1}`,
     ];
 
     for (const n of map.values()) n.visited = false;
@@ -295,6 +305,7 @@ export default function TileField({ voxelSize, focus, bounds, workers, inbox }: 
     // and collect any cell that needs voxelizing.
     const req: { key: string; level: number; d: number }[] = [];
     const visit = (L: number, ix: number, iz: number) => {
+      ix = wrapCol(ix, L); // canonical column ⇒ one geographic column = one node = one mesh
       const cell = cellAt(L);
       const minZ = iz * cell;
       const maxZ = minZ + cell;
@@ -321,7 +332,13 @@ export default function TileField({ voxelSize, focus, bounds, workers, inbox }: 
       }
       const cx = (ix + 0.5) * cell;
       const cz = (iz + 0.5) * cell;
-      const dh = Math.hypot(cx - rx, cz - rz);
+      // Wrap-aware horizontal distance (shortest signed longitude delta): a column near
+      // the focus gets a small dh regardless of which wrapped representation it is, so
+      // every copy resolves to the SAME target level (and, with canonical keying, the
+      // SAME node). Also fixes the antimeridian LOD seam.
+      let dxh = cx - rx;
+      dxh = ((dxh + spanX / 2) % spanX + spanX) % spanX - spanX / 2;
+      const dh = Math.hypot(dxh, cz - rz);
       // Cull the far hemisphere (entirely beyond the spherical horizon) and cells
       // wholly behind the camera. Culled cells draw nothing; the starfield shows
       // through. Both tests carry the cell's own size as margin so a big cell that
@@ -364,23 +381,38 @@ export default function TileField({ voxelSize, focus, bounds, workers, inbox }: 
       }
     };
 
-    // Scan the coarse roots over the visible cap. X is centred on the FOCUS (so cells
-    // across the antimeridian from it get seam-correct, focus-relative LOD) and widened
-    // to also reach the cap centre; clamped to one longitude period so each geographic
-    // cell is scanned once (no double-draw). Z uses the cap's absolute Mercator-correct
-    // latitude band, which extends far enough north/south near the poles to avoid holes.
-    // The per-cell ECEF horizon cull prunes the far side. Root cells are large by design
-    // (cellCols·baseVoxel + GLOBE_EXTRA_LEVELS), so even a whole hemisphere is few roots.
+    // Scan the coarse roots over the visible cap. X iterates the periodic column grid so
+    // each geographic column is visited exactly once (no double-draw across the wrap);
+    // wrap-aware dh (above) gives every column correct focus-relative LOD regardless of
+    // representation, so the scan can centre on the cap, not the focus. Z uses the cap's
+    // absolute Mercator-correct latitude band, which extends far enough north/south near
+    // the poles to avoid holes. The per-cell ECEF horizon cull prunes the far side. Root
+    // cells are large by design (colsAt(Lmax) is tiny — a couple of cells wrap the globe).
     const rootCell = cellAt(Lmax);
-    let dxToCap = capB.current.xC - rx; // shortest wrapped flat-x from focus to cap centre
-    dxToCap = ((dxToCap + spanX / 2) % spanX + spanX) % spanX - spanX / 2;
-    const xHalfW = Math.min(spanX / 2, capB.current.xHalf + Math.abs(dxToCap));
-    const i0 = Math.floor((rx - xHalfW - rootCell) / rootCell);
-    const i1 = Math.floor((rx + xHalfW + rootCell) / rootCell);
+    const nRootCols = colsAt(Lmax);
     const k0 = Math.floor((capB.current.zMin - rootCell) / rootCell);
     const k1 = Math.floor((capB.current.zMax + rootCell) / rootCell);
+    // Distinct wrapped root columns covering the visible cap, each scanned ONCE — so a
+    // geographic column is never drawn twice (the old flat-x window over-scanned past a
+    // full longitude period and double-drew). When the cap reaches a pole its longitude
+    // span is the whole globe (xHalf = spanX/2) → scan every column; otherwise scan the
+    // contiguous band around the cap centre (±1 column margin) and dedupe via the wrap.
+    // The per-cell horizon + frustum culls below prune the far side.
+    let xCols: number[];
+    if (capB.current.xHalf >= spanX / 2 - 1e-6 || nRootCols <= 4) {
+      xCols = Array.from({ length: nRootCols }, (_, i) => i);
+    } else {
+      const lo = Math.floor((capB.current.xC - capB.current.xHalf) / rootCell) - 1;
+      const hi = Math.floor((capB.current.xC + capB.current.xHalf) / rootCell) + 1;
+      const seen = new Set<number>();
+      xCols = [];
+      for (let i = lo; i <= hi; i++) {
+        const w = wrapCol(i, Lmax);
+        if (!seen.has(w)) { seen.add(w); xCols.push(w); }
+      }
+    }
     const roots: string[] = [];
-    for (let ix = i0; ix <= i1; ix++) {
+    for (const ix of xCols) {
       for (let iz = k0; iz <= k1; iz++) {
         visit(Lmax, ix, iz);
         if (map.get(`${Lmax}_${ix}_${iz}`)?.visited) roots.push(`${Lmax}_${ix}_${iz}`);

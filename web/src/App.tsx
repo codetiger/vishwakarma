@@ -50,6 +50,8 @@ const POOL_SIZE = Math.max(
 
 const DEFAULT_SIZE = 0.5; // placeholder until the manifest sets the real finest size
 
+const TILT_STEP = Math.PI / 18; // ~10° of tilt per click of the tilt buttons
+
 // Tile/manifest base, resolved to an ABSOLUTE url. The voxel worker's own base is
 // /assets/, so a relative `./pyramid/...` would fetch from there (404) — the main
 // thread and worker must agree on the same absolute manifest + tile urls.
@@ -80,8 +82,8 @@ function Compass() {
   return (
     <button
       className="compass"
-      aria-label="Reset north"
-      title="Reset north"
+      aria-label="Reset view (north & top-down)"
+      title="Reset view (north & top-down)"
       onClick={() => cameraControls.resetNorth()}
     >
       <svg viewBox="-22 -22 44 44" width="44" height="44" aria-hidden="true">
@@ -92,6 +94,53 @@ function Compass() {
         </g>
       </svg>
     </button>
+  );
+}
+
+// Tilt buttons: nudge the camera between top-down and an oblique terrain view so the
+// 3D tilt is discoverable (middle-drag also tilts, but it's hidden). Mirrors the zoom
+// stack + the Compass's bridge-poll idiom: each click posts a tiltBy intent that
+// RoamControls applies, and we poll the live pitch to dim a button at its limit.
+function TiltControls() {
+  const [pitch, setPitch] = useState(cameraControls.pitch);
+  useEffect(() => {
+    let raf = 0;
+    const tick = () => {
+      setPitch(cameraControls.pitch);
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, []);
+  const { pitchMin, pitchMax } = mapTheme.view;
+  const atTopDown = pitch >= pitchMax - 0.02;
+  const atHorizon = pitch <= pitchMin + 0.02;
+  return (
+    <div className="tilt-stack">
+      <button
+        className="ctl-btn"
+        aria-label="Tilt toward top-down"
+        title="Tilt toward top-down"
+        disabled={atTopDown}
+        onClick={() => cameraControls.tiltBy(TILT_STEP)}
+      >
+        <svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true">
+          <rect x="4.5" y="4.5" width="11" height="11" rx="2" fill="none" stroke="currentColor" strokeWidth="1.6" />
+          <circle cx="10" cy="10" r="1.5" fill="currentColor" />
+        </svg>
+      </button>
+      <button
+        className="ctl-btn"
+        aria-label="Tilt toward horizon"
+        title="Tilt to see terrain in 3D"
+        disabled={atHorizon}
+        onClick={() => cameraControls.tiltBy(-TILT_STEP)}
+      >
+        <svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true">
+          <path d="M2.5 15.5 L7 8 L10 11.5 L13 6.5 L17.5 15.5 Z" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
+        </svg>
+      </button>
+    </div>
   );
 }
 
@@ -475,6 +524,7 @@ export default function App() {
 
       {status === "ready" && (
         <div className="view-controls">
+          <TiltControls />
           <Compass />
           <div className="zoom-stack">
             <button

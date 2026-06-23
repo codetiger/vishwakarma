@@ -268,6 +268,7 @@ body,
 }
 
 .zoom-stack,
+.tilt-stack,
 .compass {
   pointer-events: auto;
   background: var(--panel);
@@ -276,7 +277,8 @@ body,
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
 }
 
-.zoom-stack {
+.zoom-stack,
+.tilt-stack {
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -284,6 +286,8 @@ body,
 }
 
 .ctl-btn {
+  display: grid;
+  place-items: center;
   width: 42px;
   height: 42px;
   background: transparent;
@@ -296,9 +300,14 @@ body,
   transition: opacity 0.15s ease, background 0.15s ease;
 }
 
-.ctl-btn:hover {
+.ctl-btn:hover:not(:disabled) {
   opacity: 1;
   background: rgba(227, 162, 92, 0.12);
+}
+
+.ctl-btn:disabled {
+  opacity: 0.3;
+  cursor: default;
 }
 
 .ctl-btn + .ctl-btn {
