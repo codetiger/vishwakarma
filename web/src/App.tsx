@@ -248,6 +248,10 @@ export default function App() {
     return () => cancelAnimationFrame(raf);
   }, [dbgOpen]);
 
+  // The control tray collapses off the left edge so the 3D scene fills the screen;
+  // when collapsed only a small launcher button remains, which reopens it.
+  const [panelOpen, setPanelOpen] = useState(true);
+
   // Attribution popover (next to the GitHub icon) and the palette dropdown — both
   // anchored menus that dismiss on outside-click / Escape.
   const [showInfo, setShowInfo] = useState(false);
@@ -366,8 +370,40 @@ export default function App() {
         </div>
       )}
 
-      <div className="panel">
+      {!panelOpen && (
+        <button
+          className="panel-launcher"
+          aria-label="Show controls"
+          title="Show controls"
+          onClick={() => setPanelOpen(true)}
+        >
+          <svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true" focusable="false">
+            <g fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
+              <line x1="3" y1="6" x2="17" y2="6" />
+              <line x1="3" y1="10" x2="17" y2="10" />
+              <line x1="3" y1="14" x2="17" y2="14" />
+            </g>
+            <g fill="currentColor">
+              <circle cx="13" cy="6" r="2.1" />
+              <circle cx="7" cy="10" r="2.1" />
+              <circle cx="11" cy="14" r="2.1" />
+            </g>
+          </svg>
+        </button>
+      )}
+
+      <div className={`panel${panelOpen ? "" : " is-collapsed"}`} aria-hidden={!panelOpen}>
         <div className="panel-actions">
+          <button
+            className="collapse-btn"
+            aria-label="Hide controls"
+            title="Hide controls"
+            onClick={() => setPanelOpen(false)}
+          >
+            <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true" focusable="false">
+              <path d="M12 5 L7 10 L12 15" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </button>
           <div className="info-wrap" ref={infoRef}>
             <button
               className="info-btn"

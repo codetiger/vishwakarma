@@ -16,6 +16,10 @@ body,
   height: 100%;
   width: 100%;
   overflow: hidden;
+  /* Kill iOS rubber-band scroll + long-press callout so a touch that strays off the
+     canvas (onto the UI) can't bounce or select-menu the page mid-gesture. */
+  overscroll-behavior: none;
+  -webkit-touch-callout: none;
   background: #0a0e1a;
   font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
   color: var(--ink);
@@ -44,11 +48,45 @@ body,
   border: 1px solid rgba(227, 162, 92, 0.25);
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
   user-select: none;
+  transition: transform 0.28s ease, opacity 0.28s ease;
+}
+
+/* Collapsed: slide the whole tray off the left edge and drop it from interaction,
+   leaving only `.panel-launcher` (rendered in its place) to reopen it. */
+.panel.is-collapsed {
+  transform: translateX(calc(-100% - 24px));
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* The launcher that replaces the collapsed tray (top-left, same spot as the panel). */
+.panel-launcher {
+  position: absolute;
+  top: 20px;
+  left: 20px;
+  z-index: 11;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  background: var(--panel);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(227, 162, 92, 0.25);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+  color: var(--amber);
+  cursor: pointer;
+  opacity: 0.9;
+  transition: opacity 0.15s ease;
+}
+
+.panel-launcher:hover {
+  opacity: 1;
 }
 
 .panel h1 {
   margin: 0;
-  padding-right: 58px;
+  padding-right: 86px;
   font-size: 18px;
   font-weight: 600;
   letter-spacing: 0.02em;
@@ -196,7 +234,8 @@ body,
 }
 
 .panel .repo,
-.panel .info-btn {
+.panel .info-btn,
+.panel .collapse-btn {
   display: inline-flex;
   padding: 0;
   background: none;
@@ -209,7 +248,8 @@ body,
 
 .panel .repo:hover,
 .panel .info-btn:hover,
-.panel .info-btn[aria-expanded='true'] {
+.panel .info-btn[aria-expanded='true'],
+.panel .collapse-btn:hover {
   opacity: 1;
 }
 
@@ -387,4 +427,93 @@ body,
 }
 .dbg-chk input {
   accent-color: var(--amber);
+}
+
+/* Phones / narrow screens. The breakpoint matches Stage.tsx's `isMobile < 760`, so
+   the lighter render path and the compact UI switch together. The info panel becomes
+   fluid (no 280px overflow), and the nav buttons grow to a comfortable ~48px touch
+   target. The canvas keeps `touch-action: none` (above) so pinch reaches our handler. */
+@media (max-width: 760px) {
+  .panel {
+    top: 12px;
+    left: 12px;
+    right: 12px;
+    width: auto;
+    max-width: 320px;
+    padding: 14px 16px;
+  }
+
+  .panel-launcher {
+    top: 12px;
+    left: 12px;
+  }
+
+  .panel h1 {
+    font-size: 16px;
+  }
+
+  /* The native range thumb is a tiny touch target — enlarge it and make the whole
+     row tall so a fingertip lands first try. Styling the thumb forces
+     `appearance: none`, so the thin track is drawn explicitly too. */
+  .control input[type='range'] {
+    -webkit-appearance: none;
+    appearance: none;
+    height: 30px; /* tall hit area */
+    background: transparent;
+    touch-action: none; /* the slider owns the drag — no page-gesture disambiguation */
+  }
+  .control input[type='range']::-webkit-slider-runnable-track {
+    height: 6px;
+    border-radius: 999px;
+    background: rgba(227, 162, 92, 0.3);
+  }
+  .control input[type='range']::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 26px;
+    height: 26px;
+    margin-top: -10px; /* center the 26px thumb on the 6px track */
+    border-radius: 50%;
+    background: var(--amber);
+    border: 2px solid rgba(10, 14, 26, 0.9);
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.45);
+  }
+  .control input[type='range']::-moz-range-track {
+    height: 6px;
+    border-radius: 999px;
+    background: rgba(227, 162, 92, 0.3);
+  }
+  .control input[type='range']::-moz-range-thumb {
+    width: 26px;
+    height: 26px;
+    border: 2px solid rgba(10, 14, 26, 0.9);
+    border-radius: 50%;
+    background: var(--amber);
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.45);
+  }
+
+  /* Bottom navigation: larger gaps + tap targets for fingers. */
+  .view-controls {
+    right: 14px;
+    bottom: 14px;
+    gap: 14px;
+  }
+
+  .ctl-btn {
+    width: 48px;
+    height: 48px;
+    font-size: 24px;
+  }
+
+  .compass {
+    width: 52px;
+    height: 52px;
+  }
+
+  /* Roomier rows so the palette dropdown is comfortable to tap. */
+  .palette-trigger,
+  .palette-opt {
+    padding: 11px 12px;
+    font-size: 14px;
+  }
 }

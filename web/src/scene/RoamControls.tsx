@@ -36,6 +36,12 @@ import { debug } from "./debug";
 //                 heading and resets both heading and tilt)
 //   WASD        : pan the focus;  Q/E : rotate heading
 //
+//   TOUCH (mobile, mirrors the above without mouse buttons):
+//   one finger  : pan (same grab as left-drag; in space does nothing)
+//   two fingers : pinch = zoom (biased toward the midpoint), twist = heading,
+//                 vertical drag = tilt. The three are the independent components of
+//                 the two-finger transform, decomposed each move.
+//
 // The flat clipmap and voxelizer stay flat — the curvature.ts vertex shader bends
 // the geometry onto the same sphere these helpers place the camera on, so eye and
 // ground share one space.
@@ -94,6 +100,13 @@ export default function RoamControls({ focus, bounds }: Props) {
   const panActive = useRef(false); // left-drag, but only after an on-globe hit
   const last = useRef({ x: 0, y: 0 });
   const keys = useRef<Record<string, boolean>>({});
+
+  // Active TOUCH pointers (id → last client position) and the current two-finger
+  // gesture snapshot. Mouse/pen never populate these — they keep the single-pointer
+  // button paths below. Two fingers decompose into pinch→zoom, twist→heading,
+  // vertical-drag→tilt (the three independent components of a 2-point transform).
+  const pointers = useRef<Map<number, { x: number; y: number }>>(new Map());
+  const pinch = useRef({ active: false, dist: 0, angle: 0, midX: 0, midY: 0 });
 
   // Grab-drag snapshot: the camera pose + grabbed surface point + forward at drag
   // start, so the grab is a rigid globe rotation computed against a FROZEN view
@@ -193,6 +206,72 @@ export default function RoamControls({ focus, bounds }: Props) {
   useEffect(() => {
     const el = gl.domElement;
 
+    // Snapshot the grab for a pan starting at pixel (cx,cy): freeze the camera pose +
+    // grabbed surface point + forward tangent, so each move is a rigid globe rotation
+    // recomputed from the start (no drift). Returns false if the pixel is off the
+    // globe (no pan starts). Shared by mouse left-drag and single-finger touch.
+    const beginGrab = (cx: number, cy: number): boolean => {
+      const cam = camera as THREE.PerspectiveCamera;
+      if (!hitDir(cam, cx, cy)) {
+        panActive.current = false;
+        grab.current.cam = null;
+        return false;
+      }
+      panActive.current = true;
+      const snap = cam.clone();
+      grab.current.cam = snap;
+      grab.current.hitN.copy(grabDir(snap, cx, cy));
+      flatToECEF(focus.current.x, focus.current.z, 0, grab.current.focusDir).normalize();
+      enuBasis(focus.current.x, focus.current.z, grabEnu.current);
+      grab.current.heading0 = heading.current;
+      grab.current.fwd0
+        .copy(grabEnu.current.north)
+        .multiplyScalar(Math.cos(heading.current))
+        .addScaledVector(grabEnu.current.east, Math.sin(heading.current));
+      return true;
+    };
+
+    // Rigid globe-rotation pan: the rotation carrying the current cursor point back to
+    // the grabbed point is applied to BOTH the focus direction and the forward tangent
+    // (carrying heading so crossing a pole stays continuous). Computed against the
+    // frozen drag-start camera → no drift. Shared by mouse left-drag and 1-finger touch.
+    const applyGrabPan = (cx: number, cy: number) => {
+      const g = grab.current;
+      if (!g.cam) return;
+      const now = grabDir(g.cam, cx, cy);
+      quat.current.setFromUnitVectors(now, g.hitN); // current-hit → grabbed point
+      tmp.current.copy(g.focusDir).applyQuaternion(quat.current);
+      clampDirLat(tmp.current); // dodge the exact-pole singularity (heading carries the flip)
+      const [fx, fz] = ecefToFlat(tmp.current);
+      focus.current.x = fx;
+      focus.current.z = fz;
+      settleFocus();
+      grabFwd.current.copy(g.fwd0).applyQuaternion(quat.current);
+      enuBasis(focus.current.x, focus.current.z, grabEnu.current);
+      heading.current = Math.atan2(
+        grabFwd.current.dot(grabEnu.current.east),
+        grabFwd.current.dot(grabEnu.current.north),
+      );
+      resetting.current = false; // a manual grab cancels any reset-north ease
+    };
+
+    // Snapshot the two-finger gesture baseline: finger spread (→zoom), twist angle
+    // (→heading), and midpoint (→tilt). The pointer-map insertion order is stable
+    // while both fingers persist, so the angle stays continuous move-to-move. Called
+    // on the 2nd finger down and re-baselined when the finger set changes mid-gesture.
+    const beginPinch = () => {
+      const pts = [...pointers.current.values()];
+      const a = pts[0];
+      const b = pts[1];
+      pinch.current.active = true;
+      pinch.current.dist = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+      pinch.current.angle = Math.atan2(b.y - a.y, b.x - a.x);
+      pinch.current.midX = (a.x + b.x) / 2;
+      pinch.current.midY = (a.y + b.y) / 2;
+      panActive.current = false; // a second finger cancels the single-finger pan
+      grab.current.cam = null;
+    };
+
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
       const old = dist.current;
@@ -216,6 +295,20 @@ export default function RoamControls({ focus, bounds }: Props) {
     };
 
     const onPointerDown = (e: PointerEvent) => {
+      // Touch: track every finger. One finger pans (like left-drag); a second finger
+      // starts a pinch gesture (zoom + twist-rotate + vertical-drag tilt). Mouse-only
+      // button modes (middle/right) don't exist on touch, so skip them entirely.
+      if (e.pointerType === "touch") {
+        resetting.current = false;
+        el.setPointerCapture?.(e.pointerId);
+        pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+        const n = pointers.current.size;
+        if (n === 1) beginGrab(e.clientX, e.clientY); // 1-finger pan (no-op off the globe)
+        else if (n === 2) beginPinch();
+        // a 3rd+ finger is ignored; the first two keep driving the gesture
+        return;
+      }
+
       resetting.current = false;
       last.current = { x: e.clientX, y: e.clientY };
       orientMode.current = e.button === 1; // middle-drag: heading + tilt
@@ -230,28 +323,73 @@ export default function RoamControls({ focus, bounds }: Props) {
       }
 
       // Left-drag = pan. Off-globe guard: a ray that misses the sphere starts NO pan.
-      const cam = camera as THREE.PerspectiveCamera;
-      if (!hitDir(cam, e.clientX, e.clientY)) {
+      if (!beginGrab(e.clientX, e.clientY)) {
         dragging.current = false; // clicking/dragging in empty space does nothing
         return;
       }
       dragging.current = true;
-      panActive.current = true;
-      const snap = cam.clone();
-      grab.current.cam = snap;
-      grab.current.hitN.copy(grabDir(snap, e.clientX, e.clientY));
-      flatToECEF(focus.current.x, focus.current.z, 0, grab.current.focusDir).normalize();
-      // Snapshot the forward tangent so the grab can carry heading along (rigid).
-      enuBasis(focus.current.x, focus.current.z, grabEnu.current);
-      grab.current.heading0 = heading.current;
-      grab.current.fwd0
-        .copy(grabEnu.current.north)
-        .multiplyScalar(Math.cos(heading.current))
-        .addScaledVector(grabEnu.current.east, Math.sin(heading.current));
       el.setPointerCapture?.(e.pointerId);
     };
 
     const onPointerMove = (e: PointerEvent) => {
+      // Touch path: update this finger, then drive the gesture. Runs before the
+      // mouse `dragging` guard since touch uses the pointer map, not that flag.
+      if (e.pointerType === "touch") {
+        const p = pointers.current.get(e.pointerId);
+        if (!p) return;
+        p.x = e.clientX;
+        p.y = e.clientY;
+
+        if (pinch.current.active && pointers.current.size >= 2) {
+          const pts = [...pointers.current.values()];
+          const a = pts[0];
+          const b = pts[1];
+          const nd = Math.hypot(b.x - a.x, b.y - a.y) || 1; // finger spread
+          const na = Math.atan2(b.y - a.y, b.x - a.x); // twist angle
+          const nmx = (a.x + b.x) / 2;
+          const nmy = (a.y + b.y) / 2; // midpoint
+          const pc = pinch.current;
+
+          // Pinch → zoom (distance). Spreading the fingers (nd grows) → ratio < 1 →
+          // distance shrinks → zoom in; pinching together zooms out.
+          const old = dist.current;
+          dist.current = THREE.MathUtils.clamp(old * (pc.dist / nd), D_MIN, D_MAX);
+          // Bias the focus toward the gesture midpoint when zooming in — mirrors the
+          // wheel's cursor-bias so a pinch zooms toward what's between the fingers.
+          if (dist.current < old) {
+            const d = hitDir(camera as THREE.PerspectiveCamera, nmx, nmy);
+            if (d) {
+              const [hx, hz] = ecefToFlat(d);
+              const f = mapTheme.view.cursorBias * (1 - dist.current / old);
+              focus.current.x = THREE.MathUtils.lerp(focus.current.x, hx, f);
+              focus.current.z = THREE.MathUtils.lerp(focus.current.z, hz, f);
+              settleFocus();
+            }
+          }
+          // Twist → heading. A symmetric pinch barely twists, so zoom stays decoupled.
+          // Subtract: screen y is down, so a clockwise finger twist must turn the
+          // globe the same way the fingers move (otherwise it feels reversed).
+          heading.current -= wrapPi(na - pc.angle);
+          // Two-finger vertical drag → tilt: drag DOWN (midpoint y grows) lowers the
+          // pitch toward the horizon (matches the middle-drag convention). A pure
+          // pinch barely moves the midpoint, so zoom and tilt stay decoupled too.
+          userPitch.current = THREE.MathUtils.clamp(
+            userPitch.current - (nmy - pc.midY) * TILT_SPEED,
+            PITCH_MIN,
+            PITCH_MAX,
+          );
+
+          pc.dist = nd;
+          pc.angle = na;
+          pc.midX = nmx;
+          pc.midY = nmy;
+          resetting.current = false;
+        } else if (panActive.current) {
+          applyGrabPan(e.clientX, e.clientY); // single-finger pan
+        }
+        return;
+      }
+
       if (!dragging.current) return;
       const dx = e.clientX - last.current.x;
       const dy = e.clientY - last.current.y;
@@ -278,34 +416,36 @@ export default function RoamControls({ focus, bounds }: Props) {
       }
 
       if (!panActive.current) return; // left-drag that missed the globe: no-op
-      const g = grab.current;
-      if (!g.cam) return;
-      // Grab-pan = rigid globe rotation: the rotation that carries the current cursor
-      // point back to the originally-grabbed point is applied to BOTH the focus
-      // direction and the forward tangent. Computed against the frozen drag-start
-      // camera and recomputed from the start each move (no drift). grabDir is always
-      // defined (limb-clamped), so this never falls back to a runaway tangent pan.
-      const now = grabDir(g.cam, e.clientX, e.clientY);
-      quat.current.setFromUnitVectors(now, g.hitN); // current-hit → grabbed point
-      tmp.current.copy(g.focusDir).applyQuaternion(quat.current);
-      clampDirLat(tmp.current); // dodge the exact-pole singularity (heading carries the flip)
-      const [fx, fz] = ecefToFlat(tmp.current);
-      focus.current.x = fx;
-      focus.current.z = fz;
-      settleFocus();
-      // Carry heading along so crossing a pole stays continuous: rotate the start
-      // forward by the same q, re-express it in the new ENU frame. For normal pans
-      // the grab axis is tangent → ~zero twist → north stays up (Google-Earth feel).
-      grabFwd.current.copy(g.fwd0).applyQuaternion(quat.current);
-      enuBasis(focus.current.x, focus.current.z, grabEnu.current);
-      heading.current = Math.atan2(
-        grabFwd.current.dot(grabEnu.current.east),
-        grabFwd.current.dot(grabEnu.current.north),
-      );
-      resetting.current = false; // a manual grab cancels any reset-north ease
+      applyGrabPan(e.clientX, e.clientY);
     };
 
     const onPointerUp = (e: PointerEvent) => {
+      // Touch: drop the lifted finger and re-baseline the gesture so the count change
+      // never jumps. Also serves pointercancel (the OS can revoke a touch mid-gesture).
+      if (e.pointerType === "touch") {
+        pointers.current.delete(e.pointerId);
+        el.releasePointerCapture?.(e.pointerId);
+        const n = pointers.current.size;
+        if (pinch.current.active) {
+          if (n >= 2) {
+            beginPinch(); // re-baseline from the remaining two fingers (no jump)
+          } else {
+            pinch.current.active = false;
+            // Hand a lingering finger back to a fresh pan so pinch→pan never jumps.
+            const rem = [...pointers.current.values()][0];
+            if (rem) beginGrab(rem.x, rem.y);
+            else {
+              panActive.current = false;
+              grab.current.cam = null;
+            }
+          }
+        } else if (n === 0) {
+          panActive.current = false;
+          grab.current.cam = null;
+        }
+        return;
+      }
+
       dragging.current = false;
       panActive.current = false;
       orientMode.current = false;
@@ -324,6 +464,7 @@ export default function RoamControls({ focus, bounds }: Props) {
     el.addEventListener("pointerdown", onPointerDown);
     window.addEventListener("pointermove", onPointerMove);
     window.addEventListener("pointerup", onPointerUp);
+    window.addEventListener("pointercancel", onPointerUp);
     el.addEventListener("contextmenu", onContextMenu);
     window.addEventListener("keydown", kd);
     window.addEventListener("keyup", ku);
@@ -332,6 +473,7 @@ export default function RoamControls({ focus, bounds }: Props) {
       el.removeEventListener("pointerdown", onPointerDown);
       window.removeEventListener("pointermove", onPointerMove);
       window.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("pointercancel", onPointerUp);
       el.removeEventListener("contextmenu", onContextMenu);
       window.removeEventListener("keydown", kd);
       window.removeEventListener("keyup", ku);
